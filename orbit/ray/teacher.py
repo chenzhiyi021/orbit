@@ -2,7 +2,7 @@
 Teacher server for On-Policy Distillation (OPD).
 
 Follows the same Ray-actor pattern as RolloutManager in rollout.py:
-  - TeacherServer is a @ray.remote class allocated on dedicated GPUs.
+  - TeacherManager is a @ray.remote class allocated on dedicated GPUs.
   - create_teacher_server() is the factory function called from train_opd.py.
 
 The teacher is frozen throughout training; it only runs forward passes to
@@ -29,17 +29,17 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# TeacherServer
+# TeacherManager
 # ---------------------------------------------------------------------------
 
 
 @ray.remote
-class TeacherServer:
+class TeacherManager:
     """
     Ray actor wrapping a SGLang engine for frozen teacher inference.
 
-    One TeacherServer instance handles a single teacher model.
-    For MOPD with multiple teachers, instantiate one TeacherServer per
+    One TeacherManager instance handles a single teacher model.
+    For MOPD with multiple teachers, instantiate one TeacherManager per
     teacher model and route samples from train_opd.py.
 
     Public API:
@@ -84,7 +84,7 @@ class TeacherServer:
         # Initialize engines (blocking so teacher is ready before training starts)
         ray.get([engine.init.remote() for engine in self._engines])
         logger.info(
-            f"TeacherServer ready: model={args.opd_teacher_model_path}, "
+            f"TeacherManager ready: model={args.opd_teacher_model_path}, "
             f"tp_size={args.opd_teacher_tp_size}, loss_type={self.loss_type}"
         )
 
@@ -102,7 +102,7 @@ class TeacherServer:
             full_vocab    -> {"teacher_logits": [B, T, V]}
 
         MOPD extension point:
-            A router in train_opd.py calls score() on multiple TeacherServer
+            A router in train_opd.py calls score() on multiple TeacherManager
             instances in parallel and merges results before actor_model.train().
         """
         with torch.no_grad():
@@ -148,40 +148,37 @@ class TeacherServer:
 # ---------------------------------------------------------------------------
 
 
-def create_teacher_server(args, pgs) -> TeacherServer:
+def create_teacher_manager(args, pg) -> TeacherManager:
     """
-    Instantiate TeacherServer on the teacher placement group.
+    Instantiate TeacherManager on the teacher placement group.
 
     Called from train_opd.py after create_opd_placement_groups().
     The returned handle is a Ray actor ref; call .score.remote() on it.
 
     Args:
         args: parsed arguments (must include opd_teacher_* fields)
-        pgs:  dict returned by create_opd_placement_groups(),
-              must contain key "teacher"
+        pg:  teacher placement group
     """
-    teacher_pg = pgs.get("teacher")
-    if teacher_pg is None:
+    if pg is None:
         raise ValueError(
             "No 'teacher' placement group found. "
-            "Use create_opd_placement_groups() instead of create_placement_groups()."
         )
 
-    pg_obj, bundle_indices, _ = teacher_pg
+    pg_obj, bundle_indices, _ = pg
 
-    # Pin the TeacherServer head actor to the first bundle of the teacher group.
+    # Pin the TeacherManager head actor to the first bundle of the teacher group.
     # The actor itself spawns per-rank engine sub-actors inside __init__.
-    server = TeacherServer.options(
+    server = TeacherManager.options(
         num_cpus=1,
         num_gpus=0,
         scheduling_strategy=PlacementGroupSchedulingStrategy(
             placement_group=pg_obj,
             placement_group_bundle_index=bundle_indices[0],
         ),
-    ).remote(args, teacher_pg)
+    ).remote(args, pg)
 
     logger.info(
-        f"TeacherServer actor scheduled on teacher placement group "
+        f"TeacherManager actor scheduled on teacher placement group "
         f"({args.opd_teacher_tp_size} GPU(s))."
     )
     return server
@@ -199,7 +196,7 @@ def merge_teacher_signal(rollout_data: dict, teacher_output: dict) -> dict:
     rollout_data must already be materialized (not a Ray object ref).
     The merged dict is passed to actor_model.train() via ray.put().
 
-    Keys added to rollout_data depend on TeacherServer.score() loss_type:
+    Keys added to rollout_data depend on TeacherManager.score() loss_type:
         sampled_token -> "teacher_log_probs"
         topk          -> "topk_logits", "topk_indices"
         full_vocab    -> "teacher_logits"

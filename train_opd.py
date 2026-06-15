@@ -17,9 +17,9 @@ from orbit.ray.placement_group import (
     create_training_models,
 )
 from orbit.ray.teacher import (
-    TeacherServer,
+    TeacherManager,
     merge_teacher_signal,
-    create_teacher_server,
+    create_teacher_manager,
 )
 
 from orbit.utils import tracking_utils
@@ -31,11 +31,6 @@ from orbit.utils.tracking_utils import init_tracking
 from orbit.utils.training_eta import TrainingETA, format_duration
 
 logger = logging.getLogger(__name__)
-
-
-# ============================================================
-# Timing helpers (identical to train.py)
-# ============================================================
 
 @contextlib.asynccontextmanager
 async def _timed_phase(prefix: str, name: str, *, timing_raw: dict | None = None, start_extra: str = ""):
@@ -73,7 +68,7 @@ async def train(args):
     configure_logger()
     startup_timing: dict[str, float] = {}
 
-    # GPU allocation (OPD-specific: includes teacher placement group)
+    # GPU allocation
     with _timed_block("startup", "placement groups", timing_raw=startup_timing):
         pgs = create_opd_placement_groups(args)
 
@@ -84,13 +79,13 @@ async def train(args):
     with _timed_block("startup", "create rollout manager", timing_raw=startup_timing):
         rollout_manager, num_rollout_per_epoch = create_rollout_manager(args, pgs["rollout"])
 
-    # Student training model (Megatron actor); OPD does not use critic
+    # Student training model (Megatron actor)
     async with _timed_phase("startup", "create training models", timing_raw=startup_timing):
         actor_model, _ = await create_training_models(args, pgs, rollout_manager)
 
-    # Teacher inference server (frozen, on dedicated GPUs)
-    with _timed_block("startup", "create teacher server", timing_raw=startup_timing):
-        teacher_server = create_teacher_server(args, pgs)
+    # Teacher inference server
+    with _timed_block("startup", "create teacher manager", timing_raw=startup_timing):
+        teacher_server = create_teacher_manager(args, pgs["teacher"])
 
     if args.offload_rollout:
         async with _timed_phase("startup", "onload rollout weights", timing_raw=startup_timing):
