@@ -121,6 +121,37 @@ def create_placement_groups(args):
         "rollout": (pg, rollout_pg_reordered_bundle_indices, rollout_pg_reordered_gpu_ids),
     }
 
+def create_opd_placement_groups(args):
+    """Create placement groups for student(actor), teachers and rollout engines."""
+
+    num_gpus = 0
+    if args.debug_train_only:
+        num_gpus = args.actor_num_nodes * args.actor_num_gpus_per_node
+        rollout_offset = 0
+    elif args.debug_rollout_only:
+        num_gpus = args.rollout_num_gpus
+        rollout_offset = 0
+    elif args.colocate:
+        raise NotImplementedError("Colocate is not supported for OPD yet.")
+    else:
+        num_gpus = args.actor_num_nodes * args.actor_num_gpus_per_node + args.opd_teacher_num_gpus + args.rollout_num_gpus
+        teacher_offset = args.actor_num_nodes * args.actor_num_gpus_per_node
+        rollout_offset = teacher_offset + args.opd_teacher_num_gpus
+    
+    logger.info(f"Creating placement group with {num_gpus} GPUs for OPD...")
+    pg, actor_pg_reordered_bundle_indices, actor_pg_reordered_gpu_ids = _create_placement_group(num_gpus)
+
+    rollout_pg_reordered_bundle_indices = actor_pg_reordered_bundle_indices[rollout_offset:]
+    rollout_pg_reordered_gpu_ids = actor_pg_reordered_gpu_ids[rollout_offset:]
+    teacher_pg_reordered_bundle_indices = actor_pg_reordered_bundle_indices[teacher_offset:rollout_offset]
+    teacher_pg_reordered_gpu_ids = actor_pg_reordered_gpu_ids[teacher_offset:rollout_offset]
+
+    return {
+        "actor": (pg, actor_pg_reordered_bundle_indices[:teacher_offset], actor_pg_reordered_gpu_ids[:teacher_offset]),
+        "teacher": (pg, teacher_pg_reordered_bundle_indices, teacher_pg_reordered_gpu_ids),
+        "rollout": (pg, rollout_pg_reordered_bundle_indices, rollout_pg_reordered_gpu_ids),
+    }
+    
 
 def _actor_needs_reference_weights(args) -> bool:
     """Whether the actor should load a separate reference checkpoint.

@@ -1719,6 +1719,30 @@ def get_orbit_extra_args_provider(add_custom_arguments=None):
             )
             return parser
 
+        def add_opd_arguments(parser):
+            parser.add_argument(
+                "--opd-teacher-model-path",
+                type=str,
+                default=None,
+                help=(
+                    "Path to the teacher model for on-policy distillation. "
+                    "If None, OPD is disabled and training falls back to standard RL."
+                ),
+            )
+            parser.add_argument(
+                "--opd-teacher-num-gpus",
+                type=int,
+                default=1,
+                help="Number of GPUs allocated to the teacher inference server.",
+            )
+            parser.add_argument(
+                "--opd-teacher-tp-size",
+                type=int,
+                default=1,
+                help="Tensor parallel size for the teacher SGLang engine.",
+            )
+            return parser    
+
         def add_rollout_buffer_arguments(parser):
             parser.add_argument(
                 "--rollout-buffer-url",
@@ -1981,6 +2005,7 @@ def get_orbit_extra_args_provider(add_custom_arguments=None):
         parser = add_session_arguments(parser)
         parser = add_network_arguments(parser)
         parser = add_reward_model_arguments(parser)
+        parser = add_opd_arguments(parser) 
         parser = add_rollout_buffer_arguments(parser)
         parser = add_mtp_training_arguments(parser)
         parser = add_prefill_decode_disaggregation_arguments(parser)
