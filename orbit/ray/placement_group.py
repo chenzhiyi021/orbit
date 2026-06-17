@@ -122,17 +122,8 @@ def create_placement_groups(args):
     }
 
 def create_opd_placement_groups(args):
-    """Create placement groups for student (actor), teacher, and rollout engines.
-
-    GPU layout (non-colocate):
-        [0 .. actor_gpus) -> actor
-        [actor_gpus .. actor_gpus + teacher_gpus) -> teacher
-        [actor_gpus + teacher_gpus .. total) -> rollout
-
-    critic is not supported for OPD (no value function needed).
-    colocate is not supported for OPD (teacher needs dedicated GPUs).
-    debug_train_only and debug_rollout_only skip teacher allocation.
-    """
+    """Create placement groups for student (actor), teacher, and rollout engines."""
+    
     if args.use_critic:
         raise NotImplementedError("Critic is not supported for OPD training.")
     if getattr(args, "colocate", False):

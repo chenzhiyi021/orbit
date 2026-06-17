@@ -26,22 +26,23 @@ class TeacherManager:
     """
 
     def __init__(self, args, pg):
-        configure_logger()
-
-        self.args = args
-        self.loss_type = args.opd_loss_type
-        self.topk_k = args.opd_topk_k
-
         pg_obj, bundle_indices, gpu_ids = pg
-        base_gpu_id = int(gpu_ids[0])
-
-        # tp_size engines share the same pg; each takes one bundle slot.
+        
+        tp_size = args.opd_teacher_tp_size
+        total_gpus = len(gpu_ids)  
+        
+        num_engines = total_gpus // tp_size
+        
         self._engines = []
-        for i in range(args.opd_teacher_tp_size):
+        for i in range(num_engines):
+            gpu_index = i * tp_size
+            base_gpu_id = int(gpu_ids[gpu_index])
+            bundle_index = bundle_indices[gpu_index]
+            
             scheduling_strategy = PlacementGroupSchedulingStrategy(
                 placement_group=pg_obj,
                 placement_group_capture_child_tasks=True,
-                placement_group_bundle_index=bundle_indices[i],
+                placement_group_bundle_index=bundle_index,
             )
             engine = ray.remote(SGLangEngine).options(
                 num_cpus=0.2,
@@ -52,9 +53,9 @@ class TeacherManager:
                 args,
                 rank=i,
                 worker_type="teacher",
-                base_gpu_id=int(gpu_ids[i]),
+                base_gpu_id=base_gpu_id,
                 sglang_overrides={},
-                num_gpus_per_engine=args.opd_teacher_tp_size,
+                num_gpus_per_engine=tp_size, 
             )
             self._engines.append(engine)
 
@@ -66,79 +67,79 @@ class TeacherManager:
         )
 
     def score(self, token_ids: torch.Tensor, attention_mask: torch.Tensor) -> dict:
-    """
-    Score student rollout tokens with the teacher model via SGLang HTTP /generate endpoint.
-    
-    Args:
-        token_ids:      LongTensor [B, T]  -- student-generated token ids
-        attention_mask: BoolTensor [B, T]  -- 1 for real tokens, 0 for pad
-    
-    Returns:
-        dict: {"teacher_log_probs": Tensor [B, T]}
-    """
-    with torch.no_grad():
-        # 使用 rank-0 引擎（TP > 1 时内部通信）
-        engine = self._engines[0]
+        """
+        Score student rollout tokens with the teacher model via SGLang HTTP /generate endpoint.
         
-        # 1. 将 token_ids 转为 SGLang 可接受的格式
-        # SGLang /generate 支持 input_ids 直接传入
-        input_ids_list = token_ids.cpu().tolist()  # [B, T]
+        Args:
+            token_ids:      LongTensor [B, T]  -- student-generated token ids
+            attention_mask: BoolTensor [B, T]  -- 1 for real tokens, 0 for pad
         
-        # 2. 构造请求 payload
-        payload = {
-            "input_ids": input_ids_list,
-            "sampling_params": {
-                "temperature": 0.0,           # 贪婪解码
-                "max_new_tokens": 0,          # ⚠️ 关键：不生成新 token，只计算 logprobs
-                "return_logprob": True,       # 要求返回 logprobs
-            },
-            "return_logprob": True,           # 兼容不同 SGLang 版本
-        }
-        
-        # 3. 通过 HTTP 调用 SGLang 的 /generate 端点
-        server_host = engine.server_host
-        server_port = engine.server_port
-        url = f"http://{server_host}:{server_port}/generate"
-        
-        try:
-            response = requests.post(
-                url,
-                json=payload,
-                timeout=30.0,
-            )
-            response.raise_for_status()
-            result = response.json()
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Teacher score HTTP request failed: {e}")
-            raise
-        
-        # 4. 解析 SGLang 返回结果
-        # SGLang 返回格式示例:
-        # {
-        #   "text": ["..."],
-        #   "logprobs": [[{"token_id": 123, "logprob": -0.5}, ...], ...],
-        #   "input_token_logprobs": [[-0.5, -0.3, ...], ...]  # 不同版本字段不同
-        # }
-        
-        # 尝试多个可能的字段名
-        if "input_token_logprobs" in result:
-            # SGLang 0.3.x+ 返回格式
-            teacher_log_probs_list = result["input_token_logprobs"]  # [B, T]
-        elif "logprobs" in result:
-            # 兼容旧版本
-            teacher_log_probs_list = self._extract_logprobs_from_logprobs_field(
-                result["logprobs"], token_ids
-            )
-        else:
-            raise ValueError(f"Unexpected SGLang response format: {result.keys()}")
-        
-        # 5. 转换为 Tensor
-        teacher_log_probs = torch.tensor(
-            teacher_log_probs_list, 
-            dtype=torch.float32
-        )  # [B, T]
-        
-        return {"teacher_log_probs": teacher_log_probs}
+        Returns:
+            dict: {"teacher_log_probs": Tensor [B, T]}
+        """
+        with torch.no_grad():
+            # 使用 rank-0 引擎（TP > 1 时内部通信）
+            engine = self._engines[0]
+            
+            # 1. 将 token_ids 转为 SGLang 可接受的格式
+            # SGLang /generate 支持 input_ids 直接传入
+            input_ids_list = token_ids.cpu().tolist()  # [B, T]
+            
+            # 2. 构造请求 payload
+            payload = {
+                "input_ids": input_ids_list,
+                "sampling_params": {
+                    "temperature": 0.0,           # 贪婪解码
+                    "max_new_tokens": 0,          # ⚠️ 关键：不生成新 token，只计算 logprobs
+                    "return_logprob": True,       # 要求返回 logprobs
+                },
+                "return_logprob": True,           # 兼容不同 SGLang 版本
+            }
+            
+            # 3. 通过 HTTP 调用 SGLang 的 /generate 端点
+            server_host = engine.server_host
+            server_port = engine.server_port
+            url = f"http://{server_host}:{server_port}/generate"
+            
+            try:
+                response = requests.post(
+                    url,
+                    json=payload,
+                    timeout=30.0,
+                )
+                response.raise_for_status()
+                result = response.json()
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Teacher score HTTP request failed: {e}")
+                raise
+            
+            # 4. 解析 SGLang 返回结果
+            # SGLang 返回格式示例:
+            # {
+            #   "text": ["..."],
+            #   "logprobs": [[{"token_id": 123, "logprob": -0.5}, ...], ...],
+            #   "input_token_logprobs": [[-0.5, -0.3, ...], ...]  # 不同版本字段不同
+            # }
+            
+            # 尝试多个可能的字段名
+            if "input_token_logprobs" in result:
+                # SGLang 0.3.x+ 返回格式
+                teacher_log_probs_list = result["input_token_logprobs"]  # [B, T]
+            elif "logprobs" in result:
+                # 兼容旧版本
+                teacher_log_probs_list = self._extract_logprobs_from_logprobs_field(
+                    result["logprobs"], token_ids
+                )
+            else:
+                raise ValueError(f"Unexpected SGLang response format: {result.keys()}")
+            
+            # 5. 转换为 Tensor
+            teacher_log_probs = torch.tensor(
+                teacher_log_probs_list, 
+                dtype=torch.float32
+            )  # [B, T]
+            
+            return {"teacher_log_probs": teacher_log_probs}
 
 
     def _extract_logprobs_from_logprobs_field(
