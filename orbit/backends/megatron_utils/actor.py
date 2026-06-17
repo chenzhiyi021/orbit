@@ -467,6 +467,8 @@ class MegatronTrainRayActor(TrainRayActor):
 
         if self.role == "critic":
             return self.train_critic(rollout_id, rollout_data)
+        elif _is_opd_batch(rollout_data):
+            return self.train_student(rollout_id, rollout_data)
         else:
             return self.train_actor(rollout_id, rollout_data)
 
@@ -500,6 +502,75 @@ class MegatronTrainRayActor(TrainRayActor):
 
     def _use_rollout_replay(self, m) -> bool:
         return getattr(self.args, f"use_rollout_{m.name}_replay")
+
+    def train_student(self, rollout_id: int, rollout_data: RolloutBatch) -> None:
+        """Train the student model using on-policy distillation loss.
+ 
+        Called from train() when teacher signal keys are present in rollout_data.
+        Replaces the GRPO advantage-based loss with a per-token OPD loss.
+ 
+        Loss type routing (args.opd_loss_type):
+            sampled_token -> reverse-KL using teacher_log_probs scalar per token
+            topk          -> reverse-KL approximated over top-k teacher distribution
+            full_vocab    -> exact reverse-KL over full vocabulary
+ 
+        Mirrors train_actor() structure: data iterator -> optional ref log-probs
+        -> set loss_type -> train(). Replay and critic sync are not used for OPD.
+        """
+        data_iterator, num_microbatches = get_data_iterator(self.args, self.model, rollout_data)
+ 
+        with inverse_timer("train_wait"), timer("train"):
+            # OPD does not need ref log-probs for advantage computation,
+            # but still needs them if a KL regularization term is requested
+            # on top of the distillation loss (args.opd_rl_coef > 0).
+            if getattr(self.args, "opd_rl_coef", 0.0) > 0:
+                ref_data = self.compute_ref_log_probs(data_iterator, num_microbatches)
+                if ref_data is not None:
+                    rollout_data.update(ref_data)
+ 
+            self._switch_model("actor")
+ 
+            # Recompute student log-probs so the loss function has access to
+            # the current policy distribution (needed for reverse-KL computation).
+            rollout_data.update(
+                self.compute_log_prob(data_iterator, num_microbatches, store_prefix="")
+            )
+ 
+            log_rollout_data(rollout_id, self.args, rollout_data)
+ 
+            # Set loss_type so Megatron's loss function picks the OPD path.
+            # The loss function in model.py reads args.loss_type to decide
+            # whether to compute GRPO advantage loss or OPD KL loss.
+            self.args.loss_type = f"opd_{self.args.opd_loss_type}"
+ 
+            with timer("actor_train"):
+                train(
+                    rollout_id,
+                    self.model,
+                    self.optimizer,
+                    self.opt_param_scheduler,
+                    data_iterator,
+                    num_microbatches,
+                )
+ 
+            self.prof.step(rollout_id=rollout_id)
+ 
+        train_dump_utils.save_debug_train_data(self.args, rollout_id=rollout_id, rollout_data=rollout_data)
+ 
+        if should_backup_actor_after_train(self.args):
+            self.model_state_manager.backup("actor")
+ 
+        if (
+            self.args.ref_update_interval is not None
+            and (rollout_id + 1) % self.args.ref_update_interval == 0
+            and "ref" in self.model_state_manager.backup_tags
+        ):
+            with timer("ref_model_update"):
+                if is_megatron_main_rank():
+                    logger.info(f"Updating ref model at rollout_id {rollout_id}")
+                self.model_state_manager.backup("ref")
+ 
+        log_perf_data(rollout_id, self.args)
 
     def train_actor(self, rollout_id: int, rollout_data: RolloutBatch) -> None:
         # Create data iterator for log_probs and train.
@@ -737,3 +808,18 @@ class MegatronTrainRayActor(TrainRayActor):
             rank=0 if self.role == "actor" else 1,
             group_name=group_name,
         )
+
+# ---------------------------------------------------------------------------
+# Helper
+# ---------------------------------------------------------------------------
+ 
+def _is_opd_batch(rollout_data: RolloutBatch) -> bool:
+    """Return True if rollout_data contains teacher signal from TeacherServer.
+ 
+    Checks for any of the three possible teacher output keys so this works
+    regardless of which loss_type was used during scoring.
+    """
+    return any(
+        k in rollout_data
+        for k in ("teacher_log_probs", "topk_logits", "teacher_logits")
+    )
