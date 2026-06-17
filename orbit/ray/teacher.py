@@ -1,19 +1,3 @@
-"""
-Teacher server for On-Policy Distillation (OPD).
-
-Follows the same Ray-actor pattern as RolloutManager in rollout.py:
-  - TeacherManager is a @ray.remote class allocated on dedicated GPUs.
-  - create_teacher_server() is the factory function called from train_opd.py.
-
-The teacher is frozen throughout training; it only runs forward passes to
-score student-generated rollouts.
-
-Loss types (--opd-loss-type):
-  sampled_token  -- log-prob of the student's sampled token (Nemotron approach, default)
-  topk           -- top-k logits and indices for distribution-level distillation
-  full_vocab     -- full vocabulary logits (ablation only, expensive)
-"""
-
 import logging
 
 import ray
@@ -26,12 +10,6 @@ from orbit.utils.logging_utils import configure_logger
 from .utils import build_noset_visible_devices_env_vars
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# TeacherManager
-# ---------------------------------------------------------------------------
-
 
 @ray.remote
 class TeacherManager:
@@ -57,7 +35,6 @@ class TeacherManager:
         pg_obj, bundle_indices, gpu_ids = pg
         base_gpu_id = int(gpu_ids[0])
 
-        # Reuse SGLangEngine so we stay consistent with the rollout engine stack.
         # tp_size engines share the same pg; each takes one bundle slot.
         self._engines = []
         for i in range(args.opd_teacher_tp_size):
@@ -89,50 +66,108 @@ class TeacherManager:
         )
 
     def score(self, token_ids: torch.Tensor, attention_mask: torch.Tensor) -> dict:
+    """
+    Score student rollout tokens with the teacher model via SGLang HTTP /generate endpoint.
+    
+    Args:
+        token_ids:      LongTensor [B, T]  -- student-generated token ids
+        attention_mask: BoolTensor [B, T]  -- 1 for real tokens, 0 for pad
+    
+    Returns:
+        dict: {"teacher_log_probs": Tensor [B, T]}
+    """
+    with torch.no_grad():
+        # 使用 rank-0 引擎（TP > 1 时内部通信）
+        engine = self._engines[0]
+        
+        # 1. 将 token_ids 转为 SGLang 可接受的格式
+        # SGLang /generate 支持 input_ids 直接传入
+        input_ids_list = token_ids.cpu().tolist()  # [B, T]
+        
+        # 2. 构造请求 payload
+        payload = {
+            "input_ids": input_ids_list,
+            "sampling_params": {
+                "temperature": 0.0,           # 贪婪解码
+                "max_new_tokens": 0,          # ⚠️ 关键：不生成新 token，只计算 logprobs
+                "return_logprob": True,       # 要求返回 logprobs
+            },
+            "return_logprob": True,           # 兼容不同 SGLang 版本
+        }
+        
+        # 3. 通过 HTTP 调用 SGLang 的 /generate 端点
+        server_host = engine.server_host
+        server_port = engine.server_port
+        url = f"http://{server_host}:{server_port}/generate"
+        
+        try:
+            response = requests.post(
+                url,
+                json=payload,
+                timeout=30.0,
+            )
+            response.raise_for_status()
+            result = response.json()
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Teacher score HTTP request failed: {e}")
+            raise
+        
+        # 4. 解析 SGLang 返回结果
+        # SGLang 返回格式示例:
+        # {
+        #   "text": ["..."],
+        #   "logprobs": [[{"token_id": 123, "logprob": -0.5}, ...], ...],
+        #   "input_token_logprobs": [[-0.5, -0.3, ...], ...]  # 不同版本字段不同
+        # }
+        
+        # 尝试多个可能的字段名
+        if "input_token_logprobs" in result:
+            # SGLang 0.3.x+ 返回格式
+            teacher_log_probs_list = result["input_token_logprobs"]  # [B, T]
+        elif "logprobs" in result:
+            # 兼容旧版本
+            teacher_log_probs_list = self._extract_logprobs_from_logprobs_field(
+                result["logprobs"], token_ids
+            )
+        else:
+            raise ValueError(f"Unexpected SGLang response format: {result.keys()}")
+        
+        # 5. 转换为 Tensor
+        teacher_log_probs = torch.tensor(
+            teacher_log_probs_list, 
+            dtype=torch.float32
+        )  # [B, T]
+        
+        return {"teacher_log_probs": teacher_log_probs}
+
+
+    def _extract_logprobs_from_logprobs_field(
+        self, 
+        logprobs_list: list, 
+        token_ids: torch.Tensor
+    ) -> list[list[float]]:
         """
-        Score student rollout tokens with the teacher model.
-
-        Args:
-            token_ids:      LongTensor [B, T]  -- student-generated token ids
-            attention_mask: BoolTensor [B, T]  -- 1 for real tokens, 0 for pad
-
-        Returns dict whose keys depend on loss_type:
-            sampled_token -> {"teacher_log_probs": FloatTensor [B, T]}
-            topk          -> {"topk_logits": [B, T, k], "topk_indices": [B, T, k]}
-            full_vocab    -> {"teacher_logits": [B, T, V]}
-
-        MOPD extension point:
-            A router in train_opd.py calls score() on multiple TeacherManager
-            instances in parallel and merges results before actor_model.train().
+        从 SGLang 的 logprobs 字段提取每个 token 的 logprob。
+        
+        SGLang logprobs 格式:
+        [
+            [{"token_id": 101, "logprob": -0.1}, {"token_id": 2023, "logprob": -0.3}, ...],
+            ...
+        ]
         """
-        with torch.no_grad():
-            # Use the first (rank-0) engine to run the forward pass.
-            # For TP > 1, SGLangEngine handles internal tensor-parallel
-            # communication across the engine group.
-            # NOTE: replace get_logits() with the actual SGLang logprob API
-            # once orbit's SGLang version exposes it.
-            logits = ray.get(
-                self._engines[0].get_logits.remote(token_ids, attention_mask)
-            )  # [B, T, V]
+        result = []
+        for batch_idx, token_logprobs in enumerate(logprobs_list):
+            batch_logprobs = []
+            for pos_idx, token_info in enumerate(token_logprobs):
+                # 提取当前 token 的 logprob
+                if isinstance(token_info, dict):
+                    batch_logprobs.append(token_info.get("logprob", 0.0))
+                else:
+                    # 如果返回的是单个数值
+                    batch_logprobs.append(float(token_info))
+            result.append(batch_logprobs)
+        return result
 
-            if self.loss_type == "sampled_token":
-                log_probs = torch.log_softmax(logits, dim=-1)
-                # Gather the log-prob of the token the student actually sampled.
-                teacher_log_probs = log_probs.gather(
-                    dim=-1,
-                    index=token_ids.unsqueeze(-1),
-                ).squeeze(-1)  # [B, T]
-                return {"teacher_log_probs": teacher_log_probs.cpu()}
-
-            elif self.loss_type == "topk":
-                topk_logits, topk_indices = torch.topk(logits, self.topk_k, dim=-1)
-                return {
-                    "topk_logits": topk_logits.cpu(),
-                    "topk_indices": topk_indices.cpu(),
-                }
-
-            else:  # full_vocab
-                return {"teacher_logits": logits.cpu()}
 
     def offload(self):
         """Offload teacher weights to CPU to free GPU memory during student training."""
@@ -195,11 +230,6 @@ def merge_teacher_signal(rollout_data: dict, teacher_output: dict) -> dict:
 
     rollout_data must already be materialized (not a Ray object ref).
     The merged dict is passed to actor_model.train() via ray.put().
-
-    Keys added to rollout_data depend on TeacherManager.score() loss_type:
-        sampled_token -> "teacher_log_probs"
-        topk          -> "topk_logits", "topk_indices"
-        full_vocab    -> "teacher_logits"
     """
     rollout_data.update(teacher_output)
     return rollout_data
