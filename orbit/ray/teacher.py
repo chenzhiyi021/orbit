@@ -26,8 +26,10 @@ class TeacherManager:
     """
 
     def __init__(self, args, pg):
-        pg_obj, bundle_indices, gpu_ids = pg
-        
+        self.pg = pg
+        self.args = args
+
+        pg, bundle_indices, gpu_ids = self.pg
         tp_size = args.opd_teacher_tp_size
         total_gpus = len(gpu_ids)  
         
@@ -40,7 +42,7 @@ class TeacherManager:
             bundle_index = bundle_indices[gpu_index]
             
             scheduling_strategy = PlacementGroupSchedulingStrategy(
-                placement_group=pg_obj,
+                placement_group=pg,
                 placement_group_capture_child_tasks=True,
                 placement_group_bundle_index=bundle_index,
             )
@@ -63,7 +65,7 @@ class TeacherManager:
         ray.get([engine.init.remote() for engine in self._engines])
         logger.info(
             f"TeacherManager ready: model={args.opd_teacher_model_path}, "
-            f"tp_size={args.opd_teacher_tp_size}, loss_type={self.loss_type}"
+            f"tp_size={args.opd_teacher_tp_size}"
         )
 
     def score(self, token_ids: torch.Tensor, attention_mask: torch.Tensor) -> dict:
