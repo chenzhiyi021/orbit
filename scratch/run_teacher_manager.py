@@ -12,8 +12,7 @@ ray.get(pg.ready())
 
 print(f"Placement group created with bundles: {pg}")
 
-sys.argv = [
-    "",  
+sys.argv += [
     "--hf-checkpoint", "/mnt/L202500431/model/qwen2.5-0.5b-instruct",
     "--rollout-batch-size", "1",
 ]
