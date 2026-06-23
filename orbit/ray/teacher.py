@@ -1,25 +1,3 @@
-"""
-Teacher manager for On-Policy Distillation (OPD).
-
-Wraps SGLangEngine (the same engine class rollout.py uses) to run a frozen
-teacher model for scoring student-generated rollouts.
-
-Two things SGLangEngine/_compute_server_args assume that only hold for the
-student/rollout role, and how this file works around them:
-
-  1. engine.init() requires dist_init_addr/port/nccl_port as explicit
-     arguments -- these must be allocated before calling it. We reuse
-     orbit.ray.rollout._allocate_rollout_engine_addr_and_ports_normal,
-     the same function ServerGroup.start_engines() uses.
-
-  2. _compute_server_args reads args.hf_checkpoint as the model path, with
-     no teacher-specific field. We pass SGLangEngine a shallow copy of
-     args with hf_checkpoint overridden to args.opd_teacher_model_path.
-
-worker_type="teacher" is NOT specially handled inside _compute_server_args
-(only "prefill"/"decode" are) -- it currently behaves like "regular".
-"""
-
 import copy
 import logging
 
@@ -158,14 +136,14 @@ class TeacherManager:
         """
         Score student rollout tokens with the teacher model via SGLang's
         HTTP /generate endpoint.
-
+ 
         Args:
             token_ids:      LongTensor [B, T]  -- student-generated token ids
             attention_mask: BoolTensor [B, T]  -- 1 for real tokens, 0 for pad
-
+ 
         Returns:
             dict: {"teacher_log_probs": Tensor [B, T]}
-
+ 
         NOTE: max_new_tokens=0 + return_logprob=True is assumed to make
         SGLang score the input sequence without generating new tokens.
         This assumption has not been verified against a running server --
@@ -173,19 +151,32 @@ class TeacherManager:
         """
         with torch.no_grad():
             input_ids_list = token_ids.cpu().tolist()  # [B, T]
-
+ 
+            # NOTE: return_logprob belongs at the TOP LEVEL of the SGLang
+            # /generate request, not inside sampling_params -- SamplingParams
+            # does not accept a return_logprob keyword and will raise
+            # TypeError if it is passed there (confirmed via a real 500 error
+            # from a running server).
+            # NOTE: return_logprob alone is not enough -- by default SGLang's
+            # logprob_start_len=-1 means "don't return input logprobs at all".
+            # Setting logprob_start_len=0 is what makes it return a logprob
+            # for every input token (confirmed via SGLang's own CLI arg help
+            # text: "-1 means no input logprobs, 0 means all"). Without this,
+            # input_token_logprobs comes back with only one entry regardless
+            # of prompt length (confirmed empirically against a running
+            # server: a 5-token prompt returned only 1 entry before this fix).
             payload = {
                 "input_ids": input_ids_list,
                 "sampling_params": {
                     "temperature": 0.0,
                     "max_new_tokens": 0,
-                    "return_logprob": True,
                 },
                 "return_logprob": True,
+                "logprob_start_len": 0,
             }
-
+ 
             url = f"http://{self._server_host}:{self._server_port}/generate"
-
+ 
             try:
                 response = requests.post(url, json=payload, timeout=30.0)
                 response.raise_for_status()
@@ -193,19 +184,49 @@ class TeacherManager:
             except requests.exceptions.RequestException as e:
                 logger.error(f"Teacher score HTTP request failed: {e}")
                 raise
-
-            if "input_token_logprobs" in result:
-                teacher_log_probs_list = result["input_token_logprobs"]
+ 
+            # NOTE: SGLang's /generate endpoint returns a LIST of per-request
+            # results (one dict per input sequence), even for a single prompt
+            # -- e.g. [{"input_token_logprobs": [...], ...}]. Unwrap it before
+            # looking for the logprob fields. Confirmed via a real 200 OK
+            # response from a running server; the exact inner schema is
+            # logged below the first time this runs so it can be inspected.
+            if isinstance(result, list):
+                logger.info(f"score() raw response (first item): {result[0] if result else result}")
+                result = result[0]
+            else:
+                logger.info(f"score() raw response: {result}")
+ 
+            # SGLang's input_token_logprobs entries are 3-element
+            # [logprob, token_id, decoded_text] tuples, e.g.
+            #   [[None, 785, 'The'], [-2.1, 6722, ' capital'], ...]
+            # The first token's logprob is always None (no preceding
+            # context to condition on), which is expected, not an error.
+            # Confirmed via a real response: meta_info.input_token_logprobs
+            # is where SGLang puts these for this version/config, not the
+            # top-level fields this code originally checked first.
+            if "meta_info" in result and "input_token_logprobs" in result["meta_info"]:
+                raw_entries = result["meta_info"]["input_token_logprobs"]
+                teacher_log_probs_list = [
+                    entry[0] if entry[0] is not None else float("nan")
+                    for entry in raw_entries
+                ]
+            elif "input_token_logprobs" in result:
+                raw_entries = result["input_token_logprobs"]
+                teacher_log_probs_list = [
+                    entry[0] if isinstance(entry, (list, tuple)) else entry
+                    for entry in raw_entries
+                ]
             elif "logprobs" in result:
                 teacher_log_probs_list = self._extract_logprobs_from_logprobs_field(
                     result["logprobs"]
                 )
             else:
                 raise ValueError(f"Unexpected SGLang response format: {result.keys()}")
-
+ 
             teacher_log_probs = torch.tensor(teacher_log_probs_list, dtype=torch.float32)
             return {"teacher_log_probs": teacher_log_probs}
-
+ 
     def _extract_logprobs_from_logprobs_field(self, logprobs_list):
         """
         Fallback parser for older SGLang response format:
@@ -221,32 +242,32 @@ class TeacherManager:
                     batch_logprobs.append(float(token_info))
             result.append(batch_logprobs)
         return result
-
+ 
     def offload(self):
         """Offload teacher weights to CPU to free GPU memory during student training."""
         ray.get([engine.release_memory_occupation.remote() for engine in self._engines])
-
+ 
     def onload(self):
         """Reload teacher weights to GPU before scoring."""
         ray.get([engine.resume_memory_occupation.remote() for engine in self._engines])
-
-
+ 
+ 
 def create_teacher_manager(args, pg) -> "ray.actor.ActorHandle":
     """
     Instantiate TeacherManager on the teacher placement group.
-
+ 
     Called from train_opd.py after create_opd_placement_groups(). The
     returned handle is a Ray actor ref; call .score.remote() on it.
-
+ 
     Args:
         args: parsed arguments (must include opd_teacher_* fields)
         pg:   teacher placement group, as (pg_obj, bundle_indices, gpu_ids)
     """
     if pg is None:
         raise ValueError("No 'teacher' placement group found.")
-
+ 
     pg_obj, bundle_indices, _ = pg
-
+ 
     server = TeacherManager.options(
         num_cpus=1,
         num_gpus=0,
@@ -255,18 +276,18 @@ def create_teacher_manager(args, pg) -> "ray.actor.ActorHandle":
             placement_group_bundle_index=bundle_indices[0],
         ),
     ).remote(args, pg)
-
+ 
     logger.info(
         f"TeacherManager actor scheduled on teacher placement group "
         f"({args.opd_teacher_tp_size} GPU(s))."
     )
     return server
-
-
+ 
+ 
 def merge_teacher_signal(rollout_data: dict, teacher_output: dict) -> dict:
     """
     Merge teacher scoring output into rollout_data in-place.
-
+ 
     rollout_data must already be materialized (not a Ray object ref).
     The merged dict is passed to actor_model.train() via ray.put().
     """
