@@ -3,7 +3,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-ORBIT_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
+# ORBIT_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
+ORBIT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 source "${ORBIT_ROOT}/scripts/lib/tool_env.sh"
 source "${ORBIT_ROOT}/scripts/lib/common.sh"
 
@@ -16,24 +17,24 @@ ORBIT_ENTRYPOINT="${ORBIT_ENTRYPOINT:-${ORBIT_ROOT}/train_opd.py}"
 RUN_LOG="${ORBIT_ROOT}/logs/${LAUNCHER_NAME}_$(date +%Y%m%d_%H%M%S).log"
 
 # === Paths ===
-: "${HF_CKPT:?set HF_CKPT to a Hugging Face checkpoint path}"
-: "${MEGATRON_LOAD:?set MEGATRON_LOAD to a Megatron torch_dist checkpoint path}"
+HF_CKPT="/mnt/L202500431/models/qwen2.5-0.5b-instruct"
+# : "${HF_CKPT:?set HF_CKPT to a Hugging Face checkpoint path}"
+MEGATRON_LOAD="/mnt/L202500431/models/megatron_ckpt/qwen2.5-0.5b-instruct"
+# : "${MEGATRON_LOAD:?set MEGATRON_LOAD to a Megatron torch_dist checkpoint path}"
 SAVE_DIR="${ORBIT_ROOT}/orbit_ckpts/Qwen2.5-0.5B-Instruct_gsm8k_opd"
-: "${TRAIN_JSONL:?set TRAIN_JSONL to a training jsonl path}"
-TEST_JSONL=${TEST_JSONL:-}
+TRAIN_JSONL="/mnt/L202500431/datasets/gsm8k/main/train-00000-of-00001.parquet"
+# : "${TRAIN_JSONL:?set TRAIN_JSONL to a training jsonl path}"
+TEST_JSONL="/mnt/L202500431/datasets/gsm8k/main/test-00000-of-00001.parquet"
+# TEST_JSONL=${TEST_JSONL:-}
 
 # Teacher checkpoint -- MUST be same-family (same tokenizer/vocab) as the
-# student checkpoint above. Defaults to the student's own checkpoint so
-# this launcher runs out of the box; override for a real distillation run.
-: "${OPD_TEACHER_CKPT:=${HF_CKPT}}"
+# student checkpoint above.
+OPD_TEACHER_CKPT="/mnt/L202500431/models/qwen2.5-3b-instruct"
+# : "${OPD_TEACHER_CKPT:?set OPD_TEACHER_CKPT to a Hugging Face checkpoint path}"
 
 # === Resources ===
-# actor + teacher + rollout share one placement group (see
-# create_opd_placement_groups). With 4 GPUs total here: 2 for actor,
-# 1 for teacher, 1 for rollout. Adjust ACTOR_NUM_GPUS_PER_NODE /
-# OPD_TEACHER_NUM_GPUS / ROLLOUT_NUM_GPUS together if you change GPU count.
-GPUS_PER_NODE=4
-RAY_NUM_CPUS=32
+GPUS_PER_NODE=1
+RAY_NUM_CPUS=128
 
 # === Model args ===
 source "${ORBIT_ROOT}/orbit_plugins/model_args/qwen2.5-0.5B.sh"   # provides MODEL_ARGS=(...)
@@ -47,9 +48,7 @@ TRAIN_ROWS=${TRAIN_ROWS:-$(wc -l < "${TRAIN_JSONL}")}
 NUM_ROLLOUT=${NUM_ROLLOUT:-$(( (TRAIN_ROWS * TOTAL_EPOCHS + ROLLOUT_BATCH_SIZE - 1) / ROLLOUT_BATCH_SIZE ))}
 
 # === ARGS arrays ===
-# NOTE: no COLOCATE_ARGS -- create_opd_placement_groups() raises
-# NotImplementedError if --colocate is set, since the teacher needs
-# dedicated GPUs separate from the actor.
+COLOCATE_ARGS=( --colocate )
 
 CKPT_ARGS=(
     --hf-checkpoint "${HF_CKPT}"
@@ -86,9 +85,6 @@ OPTIMIZER_ARGS=(
 )
 
 # === OPD args ===
-# Replaces RL_ARGS (advantage-estimator/kl-loss/eps-clip) from the GRPO
-# launcher -- OPD's loss is the per-token reverse-KL against the teacher,
-# not a clipped-advantage policy-gradient loss, so those don't apply here.
 OPD_ARGS=(
     --opd-teacher-model-path "${OPD_TEACHER_CKPT}"
     --opd-teacher-num-gpus 1
@@ -158,9 +154,13 @@ DEBUG_ARGS=(
     --log-passrate
 )
 
-# NOTE: no PEFT_ARGS by default -- this launcher does full-FT OPD as the
-# baseline. Add --peft-method lora (or oft) here if you want to compare
-# OFT/LoRA + OPD against this baseline, per the OFT-vs-full-FT hypothesis
-# discussed with mentor.
+PEFT_ARGS=(
+    --peft-method lora
+    --peft-variant standard
+    --lora-rank 32
+    --lora-alpha 64
+    --lora-dropout 0.0
+    --target-modules all-linear
+)
 
 source "${ORBIT_ROOT}/scripts/lib/launcher.sh"
