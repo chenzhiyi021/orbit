@@ -1,13 +1,5 @@
 #!/usr/bin/env bash
 # Qwen2.5-0.5B-Instruct BF16 On-Policy Distillation (OPD) on the math dataset.
-# Self-contained launcher, mirroring run_qwen25_05b_bf16_math_megatron_lora.sh.
-#
-# Student and teacher are both Qwen2.5-0.5B-Instruct here (same checkpoint)
-# purely so this launcher is runnable end-to-end without a second model on
-# disk. For a real OPD run, OPD_TEACHER_CKPT should point at a stronger
-# same-family checkpoint (same tokenizer/vocab as the student) -- see
-# orbit/ray/teacher.py for why same-family is a hard requirement, not just
-# a recommendation.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,19 +8,17 @@ source "${ORBIT_ROOT}/scripts/lib/tool_env.sh"
 source "${ORBIT_ROOT}/scripts/lib/common.sh"
 
 # === Recipe identity ===
-LAUNCHER_NAME=run_qwen25_05b_bf16_opd
+LAUNCHER_NAME=run_qwen25_05b_bf16_gsm8k_megatron_opd_lora
 WANDB_PROJECT=${WANDB_PROJECT:-orbit-release}
 WANDB_GROUP=${WANDB_GROUP:-${LAUNCHER_NAME}}
 PRECISION_PROFILE=bf16
-# NOTE: points at train_opd.py, not train.py -- this is the OPD entry point,
-# not the standard RL training loop.
 ORBIT_ENTRYPOINT="${ORBIT_ENTRYPOINT:-${ORBIT_ROOT}/train_opd.py}"
 RUN_LOG="${ORBIT_ROOT}/logs/${LAUNCHER_NAME}_$(date +%Y%m%d_%H%M%S).log"
 
 # === Paths ===
 : "${HF_CKPT:?set HF_CKPT to a Hugging Face checkpoint path}"
 : "${MEGATRON_LOAD:?set MEGATRON_LOAD to a Megatron torch_dist checkpoint path}"
-SAVE_DIR="${ORBIT_ROOT}/orbit_ckpts/Qwen2.5-0.5B-Instruct_math_opd"
+SAVE_DIR="${ORBIT_ROOT}/orbit_ckpts/Qwen2.5-0.5B-Instruct_gsm8k_opd"
 : "${TRAIN_JSONL:?set TRAIN_JSONL to a training jsonl path}"
 TEST_JSONL=${TEST_JSONL:-}
 
