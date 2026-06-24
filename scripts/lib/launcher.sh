@@ -36,9 +36,18 @@ fi
 : "${GPUS_PER_NODE:?GPUS_PER_NODE must be set by the launcher}"
 ORBIT_ENTRYPOINT=${ORBIT_ENTRYPOINT:-"${ORBIT_ROOT}/train.py"}
 
+if declare -p RL_ARGS >/dev/null 2>&1; then
+    ALGO_ARGS="RL_ARGS"
+elif declare -p OPD_ARGS >/dev/null 2>&1; then
+    ALGO_ARGS="OPD_ARGS"
+else
+    echo "Launcher contract: Either RL_ARGS or OPD_ARGS must be defined" >&2
+    exit 2
+fi
+
 for _name in MODEL_ARGS CKPT_ARGS ROLLOUT_ARGS EVAL_ARGS PERF_ARGS \
-             RL_ARGS OPTIMIZER_ARGS SGLANG_ARGS PEFT_ARGS WANDB_ARGS \
-             MISC_ARGS LOSS_ARGS DEBUG_ARGS COLOCATE_ARGS; do
+             OPTIMIZER_ARGS SGLANG_ARGS PEFT_ARGS WANDB_ARGS \
+             MISC_ARGS LOSS_ARGS DEBUG_ARGS COLOCATE_ARGS "${ALGO_ARGS}"; do
     if ! declare -p "${_name}" >/dev/null 2>&1; then
         echo "Launcher contract: ${_name} array must be defined" >&2
         exit 2

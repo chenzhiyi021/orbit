@@ -63,7 +63,7 @@ def test_score_single(manager, args):
     rest = log_probs[1:] if log_probs.dim() == 1 else log_probs[:, 1:]
     all_finite = torch.isfinite(rest).all().item()
     all_non_positive = (rest <= 0).all().item()
-    print(f"position 0 is nan (expected): {torch.isnan(log_probs[0]).item()}")
+    print(f"position 0 is nan (expected): {torch.isnan(log_probs[0, 0]).item()}")
     print(f"All finite (excluding position 0): {all_finite}")
     print(f"All <= 0 (excluding position 0): {all_non_positive}")
 
@@ -146,6 +146,142 @@ def test_merge_teacher_signal_structure(manager, args):
 
     print("=== merge_teacher_signal structure test complete ===")
 
+def test_score_batch(manager, args):
+    """Test whether score() really supports batched inputs."""
+
+    from transformers import AutoTokenizer
+    import torch
+
+    print("\n=== Testing score() with batched inputs ===")
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.opd_teacher_model_path
+    )
+
+    prompts = [
+        "The capital of France is",
+        "Hi",
+    ]
+
+    enc = tokenizer(
+        prompts,
+        padding=True,
+        return_tensors="pt",
+    )
+
+    token_ids = enc["input_ids"]
+    attention_mask = enc["attention_mask"]
+
+    print("prompts:")
+    for i, p in enumerate(prompts):
+        print(f"  [{i}] {p}")
+
+    print("\ninput_ids shape:", token_ids.shape)
+    print(token_ids)
+
+    print("\nattention_mask shape:", attention_mask.shape)
+    print(attention_mask)
+
+    result = ray.get(
+        manager.score.remote(
+            token_ids,
+            attention_mask,
+        )
+    )
+
+    print("\nreturned keys:", list(result.keys()))
+
+    if "teacher_log_probs" not in result:
+        print("teacher_log_probs missing!")
+        print(result)
+        return
+
+    log_probs = result["teacher_log_probs"]
+
+    print("\nteacher_log_probs type:")
+    print(type(log_probs))
+
+    #
+    # Case 1
+    # Tensor[B,T]
+    #
+    if torch.is_tensor(log_probs):
+
+        print("Tensor output detected")
+
+        print("shape:", log_probs.shape)
+        print(log_probs)
+
+        assert log_probs.ndim == 2, (
+            f"Expected [B,T], got {log_probs.shape}"
+        )
+
+        assert log_probs.shape[0] == len(prompts), (
+            f"Expected batch={len(prompts)}, "
+            f"got {log_probs.shape[0]}"
+        )
+
+        print("\nPer sample:")
+
+        for i in range(log_probs.shape[0]):
+
+            lp = log_probs[i]
+
+            print(
+                f"sample {i}: "
+                f"first_is_nan={torch.isnan(lp[0]).item()}, "
+                f"finite_after0={torch.isfinite(lp[1:]).all().item()}"
+            )
+
+    #
+    # Case 2
+    # List[Tensor]
+    #
+    elif isinstance(log_probs, list):
+
+        print("List output detected")
+
+        print("batch size:", len(log_probs))
+
+        assert len(log_probs) == len(prompts)
+
+        for i, lp in enumerate(log_probs):
+
+            print(
+                f"\nsample {i}"
+            )
+
+            print("type:", type(lp))
+
+            if torch.is_tensor(lp):
+
+                print("shape:", lp.shape)
+
+                print(lp)
+
+                print(
+                    "first_is_nan:",
+                    torch.isnan(lp[0]).item()
+                )
+
+                if len(lp) > 1:
+                    print(
+                        "finite_after0:",
+                        torch.isfinite(lp[1:]).all().item()
+                    )
+
+            else:
+
+                print("unexpected element type")
+                print(lp)
+
+    else:
+
+        print("\nUnexpected output type")
+        print(type(log_probs))
+        print(log_probs)
+
+    print("\n=== score() batch test complete ===")
 
 def main():
     args = parse_args()
@@ -168,6 +304,7 @@ def main():
     manager = setup(args)
 
     test_score_single(manager, args)
+    test_score_batch(manager, args)
     test_merge_teacher_signal_structure(manager, args)
 
 

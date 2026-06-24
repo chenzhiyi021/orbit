@@ -62,9 +62,9 @@ CKPT_ARGS=(
 
 ROLLOUT_ARGS=(
     --prompt-data "${TRAIN_JSONL}"
-    --input-key prompt
-    --label-key label
-    --apply-chat-template
+    --input-key question
+    --label-key answer
+    # --apply-chat-template
     --rollout-shuffle
     --rm-type math
     --num-rollout "${NUM_ROLLOUT}"

@@ -7,6 +7,7 @@ import torch
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from orbit.backends.sglang_utils.sglang_engine import SGLangEngine
+from orbit.backends.megatron_utils.actor import get_rollout_data
 # NOTE：
 # I reuse _allocate_rollout_engine_addr_and_ports_normal for convience.
 # TODO:
@@ -134,37 +135,14 @@ class TeacherManager:
 
     def score(self, token_ids: torch.Tensor, attention_mask: torch.Tensor) -> dict:
         """
-        Score student rollout tokens with the teacher model via SGLang's
-        HTTP /generate endpoint.
- 
-        Args:
-            token_ids:      LongTensor [B, T]  -- student-generated token ids
-            attention_mask: BoolTensor [B, T]  -- 1 for real tokens, 0 for pad
- 
-        Returns:
-            dict: {"teacher_log_probs": Tensor [B, T]}
- 
-        NOTE: max_new_tokens=0 + return_logprob=True is assumed to make
-        SGLang score the input sequence without generating new tokens.
-        This assumption has not been verified against a running server --
-        confirm the response shape/fields the first time this is run.
+        Return:
+            {"teacher_log_probs": List[Tensor[T_i]]}
+            OR optionally padded Tensor[B, T] if you choose later
         """
+
         with torch.no_grad():
             input_ids_list = token_ids.cpu().tolist()  # [B, T]
- 
-            # NOTE: return_logprob belongs at the TOP LEVEL of the SGLang
-            # /generate request, not inside sampling_params -- SamplingParams
-            # does not accept a return_logprob keyword and will raise
-            # TypeError if it is passed there (confirmed via a real 500 error
-            # from a running server).
-            # NOTE: return_logprob alone is not enough -- by default SGLang's
-            # logprob_start_len=-1 means "don't return input logprobs at all".
-            # Setting logprob_start_len=0 is what makes it return a logprob
-            # for every input token (confirmed via SGLang's own CLI arg help
-            # text: "-1 means no input logprobs, 0 means all"). Without this,
-            # input_token_logprobs comes back with only one entry regardless
-            # of prompt length (confirmed empirically against a running
-            # server: a 5-token prompt returned only 1 entry before this fix).
+
             payload = {
                 "input_ids": input_ids_list,
                 "sampling_params": {
@@ -174,58 +152,56 @@ class TeacherManager:
                 "return_logprob": True,
                 "logprob_start_len": 0,
             }
- 
+
             url = f"http://{self._server_host}:{self._server_port}/generate"
- 
+
             try:
                 response = requests.post(url, json=payload, timeout=30.0)
                 response.raise_for_status()
                 result = response.json()
+
             except requests.exceptions.RequestException as e:
                 logger.error(f"Teacher score HTTP request failed: {e}")
                 raise
- 
-            # NOTE: SGLang's /generate endpoint returns a LIST of per-request
-            # results (one dict per input sequence), even for a single prompt
-            # -- e.g. [{"input_token_logprobs": [...], ...}]. Unwrap it before
-            # looking for the logprob fields. Confirmed via a real 200 OK
-            # response from a running server; the exact inner schema is
-            # logged below the first time this runs so it can be inspected.
-            if isinstance(result, list):
-                logger.info(f"score() raw response (first item): {result[0] if result else result}")
-                result = result[0]
-            else:
-                logger.info(f"score() raw response: {result}")
- 
-            # SGLang's input_token_logprobs entries are 3-element
-            # [logprob, token_id, decoded_text] tuples, e.g.
-            #   [[None, 785, 'The'], [-2.1, 6722, ' capital'], ...]
-            # The first token's logprob is always None (no preceding
-            # context to condition on), which is expected, not an error.
-            # Confirmed via a real response: meta_info.input_token_logprobs
-            # is where SGLang puts these for this version/config, not the
-            # top-level fields this code originally checked first.
-            if "meta_info" in result and "input_token_logprobs" in result["meta_info"]:
-                raw_entries = result["meta_info"]["input_token_logprobs"]
-                teacher_log_probs_list = [
-                    entry[0] if entry[0] is not None else float("nan")
-                    for entry in raw_entries
-                ]
-            elif "input_token_logprobs" in result:
-                raw_entries = result["input_token_logprobs"]
-                teacher_log_probs_list = [
-                    entry[0] if isinstance(entry, (list, tuple)) else entry
-                    for entry in raw_entries
-                ]
-            elif "logprobs" in result:
-                teacher_log_probs_list = self._extract_logprobs_from_logprobs_field(
-                    result["logprobs"]
-                )
-            else:
-                raise ValueError(f"Unexpected SGLang response format: {result.keys()}")
- 
-            teacher_log_probs = torch.tensor(teacher_log_probs_list, dtype=torch.float32)
-            return {"teacher_log_probs": teacher_log_probs}
+
+        # =========================
+        # 1. normalize batch format
+        # =========================
+        if not isinstance(result, list):
+            result = [result]
+
+        # =========================
+        # 2. parse each sample
+        # =========================
+        teacher_log_probs_list = []
+
+        for r in result:
+            meta = r.get("meta_info", {})
+
+            raw_entries = meta.get("input_token_logprobs", None)
+
+            print(f"Raw entries: {raw_entries}")
+            print(f"Raw entries type: {type(raw_entries)}")
+
+            if raw_entries is None:
+                raise ValueError(f"Missing input_token_logprobs in {meta.keys()}")
+
+            teacher_log_probs = [
+                entry[0] if entry[0] is not None else float("nan")
+                for entry in raw_entries
+            ]
+            print(f"Teacher log probs: {teacher_log_probs_list=}")
+            teacher_log_probs_list.append(
+                torch.tensor(teacher_log_probs, dtype=torch.float32)
+            )
+
+        # =========================
+        # 3. return batch-safe format
+        # =========================
+        teacher_log_probs_tensor = torch.stack(teacher_log_probs_list)
+        return {
+            "teacher_log_probs": teacher_log_probs_tensor
+        }
  
     def _extract_logprobs_from_logprobs_field(self, logprobs_list):
         """

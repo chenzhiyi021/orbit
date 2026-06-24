@@ -180,10 +180,11 @@ async def train(args):
         # MOPD extension point: replace single score.remote() with a routing
         # layer that dispatches to multiple teachers by domain/task.
         async with _timed_phase(prefix, "teacher score", timing_raw=timing_raw):
-            rollout_data = ray.get(rollout_data_ref)
-            teacher_output = ray.get(
-                teacher_server.score.remote(rollout_data["tokens"])
-            )
+            teacher_output_ref = await teacher_server.score.remote(rollout_data_ref)
+            # rollout_data = ray.get(rollout_data_ref)
+            # teacher_output = ray.get(
+            #     teacher_server.score.remote(rollout_data["tokens"])
+            # )
 
         # Merge teacher signal into rollout data
         with _timed_block(prefix, "merge teacher signal", timing_raw=timing_raw):
