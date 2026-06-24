@@ -32,6 +32,7 @@ from orbit.utils.training_eta import TrainingETA, format_duration
 
 logger = logging.getLogger(__name__)
 
+
 @contextlib.asynccontextmanager
 async def _timed_phase(prefix: str, name: str, *, timing_raw: dict | None = None, start_extra: str = ""):
     if start_extra:
@@ -166,15 +167,22 @@ async def train(args):
         # teacher_server runs on dedicated GPUs; scoring is independent of
         # rollout and training GPUs so no memory conflict.
         #
+        # NOTE: rollout_data["tokens"] is a ragged list of list[int] (samples
+        # are NOT pre-padded to a common length -- confirmed via
+        # RolloutManager._convert_samples_to_train_data, which builds
+        # "tokens" as [sample.tokens for sample in samples] without padding).
+        # score() accepts this directly: SGLang's /generate endpoint takes
+        # input_ids as a list of lists and does not require a rectangular
+        # batch, so there is no separate "attention_mask" concept here
+        # (unlike padded-tensor APIs) -- each sequence's real length is just
+        # its own list length.
+        #
         # MOPD extension point: replace single score.remote() with a routing
         # layer that dispatches to multiple teachers by domain/task.
         async with _timed_phase(prefix, "teacher score", timing_raw=timing_raw):
             rollout_data = ray.get(rollout_data_ref)
             teacher_output = ray.get(
-                teacher_server.score.remote(
-                    rollout_data["token_ids"],
-                    rollout_data["attention_mask"],
-                )
+                teacher_server.score.remote(rollout_data["tokens"])
             )
 
         # Merge teacher signal into rollout data
@@ -184,9 +192,10 @@ async def train(args):
 
         # --- Step 3: Student trains on (rollout + teacher signal) ---
         #
-        # actor_model.train() detects teacher keys in the data dict and
-        # switches loss to OPD objective. Modification needed in
-        # orbit/backends/megatron_utils/actor.py.
+        # actor_model.train() detects teacher keys in the data dict (see
+        # _is_opd_batch in orbit/backends/megatron_utils/actor.py) and
+        # routes to train_student(), which masks out the nan at position 0
+        # of each teacher_log_probs entry before it reaches the loss.
         async with _timed_phase(prefix, "actor train", timing_raw=timing_raw):
             await actor_model.train(rollout_id, opd_data_ref)
 

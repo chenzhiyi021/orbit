@@ -505,44 +505,81 @@ class MegatronTrainRayActor(TrainRayActor):
 
     def train_student(self, rollout_id: int, rollout_data: RolloutBatch) -> None:
         """Train the student model using on-policy distillation loss.
- 
+
         Called from train() when teacher signal keys are present in rollout_data.
         Replaces the GRPO advantage-based loss with a per-token OPD loss.
- 
-        Loss type routing (args.opd_loss_type):
-            sampled_token -> reverse-KL using teacher_log_probs scalar per token
-            topk          -> reverse-KL approximated over top-k teacher distribution
-            full_vocab    -> exact reverse-KL over full vocabulary
- 
-        Mirrors train_actor() structure: data iterator -> optional ref log-probs
-        -> set loss_type -> train(). Replay and critic sync are not used for OPD.
+
+        Mirrors train_actor()'s replay-manager bookkeeping (stage transitions,
+        clear_all_forward/clear_all) so OPD runs stay correct if replay is
+        enabled, even though OPD itself does not use replay data today.
+
+        NOTE on rollout_data["teacher_log_probs"]: the first token of every
+        sequence has no preceding context, so the teacher cannot score it --
+        TeacherManager.score() fills that position with nan (see
+        orbit/ray/teacher.py). nan must be masked out before it reaches the
+        loss, or it will silently poison the gradient (any arithmetic
+        involving nan produces nan). This is done here via a position-0 mask
+        rather than inside TeacherManager, since the masking convention
+        (loss_masks) is a training-side concept the teacher has no reason to
+        know about.
         """
         data_iterator, num_microbatches = get_data_iterator(self.args, self.model, rollout_data)
- 
+
+        # Mask out the nan-valued first-token teacher logprob before it can
+        # reach the loss. We zero the logprob itself (so no nan propagates
+        # even if a loss implementation forgets to apply the mask) and clear
+        # the corresponding loss_masks entry (so the masked loss correctly
+        # excludes this position regardless of how it is computed).
+        if "teacher_log_probs" in rollout_data:
+            for seq_idx, log_probs in enumerate(rollout_data["teacher_log_probs"]):
+                if len(log_probs) > 0 and torch.isnan(log_probs[0]):
+                    log_probs[0] = 0.0
+                    if "loss_masks" in rollout_data and seq_idx < len(rollout_data["loss_masks"]):
+                        mask = rollout_data["loss_masks"][seq_idx]
+                        if len(mask) > 0:
+                            mask[0] = 0
+
         with inverse_timer("train_wait"), timer("train"):
-            # OPD does not need ref log-probs for advantage computation,
-            # but still needs them if a KL regularization term is requested
-            # on top of the distillation loss (args.opd_rl_coef > 0).
+            # Replay-manager bookkeeping mirrors train_actor(): even though
+            # OPD does not consume replay data, leaving managers in whatever
+            # stage they were last set to is a latent bug if replay is
+            # enabled for this run. "record" keeps behavior identical to
+            # train_actor()'s non-rollout-replay branch.
+            for m in all_replay_managers:
+                if m.enabled:
+                    m.stage = "record"
+
+            # OPD's KL term is against the teacher, not a reference model, so
+            # ref log-probs are only needed when an additional RL-style KL
+            # term is explicitly requested via --opd-rl-coef.
             if getattr(self.args, "opd_rl_coef", 0.0) > 0:
                 ref_data = self.compute_ref_log_probs(data_iterator, num_microbatches)
                 if ref_data is not None:
                     rollout_data.update(ref_data)
- 
+
+            # compute_ref_log_probs() may leave the active model switched to
+            # "ref" (full-FT KL path) or running under disable_adapter()
+            # (PEFT path) -- switch back to "actor" before computing student
+            # log-probs and training, regardless of which path was taken.
             self._switch_model("actor")
- 
+
             # Recompute student log-probs so the loss function has access to
             # the current policy distribution (needed for reverse-KL computation).
             rollout_data.update(
                 self.compute_log_prob(data_iterator, num_microbatches, store_prefix="")
             )
- 
+            for m in all_replay_managers:
+                if self._use_rollout_replay(m):
+                    m.clear_all_forward()
+
             log_rollout_data(rollout_id, self.args, rollout_data)
- 
+
             # Set loss_type so Megatron's loss function picks the OPD path.
             # The loss function in model.py reads args.loss_type to decide
             # whether to compute GRPO advantage loss or OPD KL loss.
             self.args.loss_type = f"opd_{self.args.opd_loss_type}"
- 
+
+            self._set_replay_stage("replay_backward")
             with timer("actor_train"):
                 train(
                     rollout_id,
@@ -552,14 +589,18 @@ class MegatronTrainRayActor(TrainRayActor):
                     data_iterator,
                     num_microbatches,
                 )
- 
+
             self.prof.step(rollout_id=rollout_id)
- 
+
         train_dump_utils.save_debug_train_data(self.args, rollout_id=rollout_id, rollout_data=rollout_data)
- 
+
+        for m in all_replay_managers:
+            if m.enabled:
+                m.clear_all()
+
         if should_backup_actor_after_train(self.args):
             self.model_state_manager.backup("actor")
- 
+
         if (
             self.args.ref_update_interval is not None
             and (rollout_id + 1) % self.args.ref_update_interval == 0
@@ -569,7 +610,7 @@ class MegatronTrainRayActor(TrainRayActor):
                 if is_megatron_main_rank():
                     logger.info(f"Updating ref model at rollout_id {rollout_id}")
                 self.model_state_manager.backup("ref")
- 
+
         log_perf_data(rollout_id, self.args)
 
     def train_actor(self, rollout_id: int, rollout_data: RolloutBatch) -> None:
