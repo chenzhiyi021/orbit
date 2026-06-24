@@ -98,19 +98,71 @@ class TestNormalPath:
         assert pgs["rollout"][1] == [9]
 
 
+class TestColocate:
+    """colocate=True means all three roles share every bundle -- there is
+    no partial-colocate mode (e.g. actor+teacher sharing while rollout is
+    separate). This is the intended single-GPU debugging configuration.
+    """
+
+    def test_single_gpu_all_roles_share_same_bundle(self):
+        from orbit.ray.placement_group import create_opd_placement_groups
+
+        args = make_args(colocate=True, actor_num_nodes=1, actor_num_gpus_per_node=1)
+        pgs = create_opd_placement_groups(args)
+
+        # total GPUs allocated = actor_gpus only (1), not actor+teacher+rollout
+        actor_pg, actor_bundles, actor_gpus = pgs["actor"]
+        teacher_pg, teacher_bundles, teacher_gpus = pgs["teacher"]
+        rollout_pg, rollout_bundles, rollout_gpus = pgs["rollout"]
+
+        assert actor_pg == teacher_pg == rollout_pg == "fake_pg_1"
+        assert actor_bundles == teacher_bundles == rollout_bundles == [0]
+        assert actor_gpus == teacher_gpus == rollout_gpus == [0]
+
+    def test_multi_gpu_all_roles_share_full_set_not_a_slice(self):
+        """With actor_gpus=3, all three roles should each get bundles
+        [0, 1, 2] -- the FULL set, not e.g. actor getting [0,1,2] while
+        teacher/rollout get an empty slice from a None:None index.
+        """
+        from orbit.ray.placement_group import create_opd_placement_groups
+
+        args = make_args(colocate=True, actor_num_nodes=1, actor_num_gpus_per_node=3)
+        pgs = create_opd_placement_groups(args)
+
+        actor_bundles = pgs["actor"][1]
+        teacher_bundles = pgs["teacher"][1]
+        rollout_bundles = pgs["rollout"][1]
+
+        assert actor_bundles == [0, 1, 2]
+        assert teacher_bundles == [0, 1, 2]
+        assert rollout_bundles == [0, 1, 2]
+
+    def test_colocate_ignores_teacher_and_rollout_gpu_counts(self):
+        """opd_teacher_num_gpus and rollout_num_gpus must NOT add extra GPUs
+        on top of actor_gpus in colocate mode -- only actor_gpus sizes the
+        placement group.
+        """
+        from orbit.ray.placement_group import create_opd_placement_groups
+
+        args = make_args(
+            colocate=True,
+            actor_num_nodes=1,
+            actor_num_gpus_per_node=2,
+            opd_teacher_num_gpus=5,   # should be ignored
+            rollout_num_gpus=7,        # should be ignored
+        )
+        pgs = create_opd_placement_groups(args)
+
+        # If these counts were NOT ignored, total would be 2+5+7=14.
+        assert pgs["actor"][0] == "fake_pg_2"
+
+
 class TestGuardrails:
     def test_critic_raises(self):
         from orbit.ray.placement_group import create_opd_placement_groups
 
         args = make_args(use_critic=True)
         with pytest.raises(NotImplementedError, match="Critic"):
-            create_opd_placement_groups(args)
-
-    def test_colocate_raises(self):
-        from orbit.ray.placement_group import create_opd_placement_groups
-
-        args = make_args(colocate=True)
-        with pytest.raises(NotImplementedError, match="Colocate"):
             create_opd_placement_groups(args)
 
 
@@ -136,3 +188,17 @@ class TestDebugModes:
         assert pgs["teacher"] is None
         rollout_pg, rollout_bundles, rollout_gpus = pgs["rollout"]
         assert rollout_bundles == [0, 1, 2]
+
+    def test_debug_train_only_takes_priority_over_colocate(self):
+        """If both debug_train_only and colocate are set, debug_train_only
+        wins -- this documents current branch ordering (debug flags are
+        checked before colocate), it is not asserting that combination is
+        a sanctioned use case.
+        """
+        from orbit.ray.placement_group import create_opd_placement_groups
+
+        args = make_args(debug_train_only=True, colocate=True, actor_num_gpus_per_node=2)
+        pgs = create_opd_placement_groups(args)
+
+        assert pgs["teacher"] is None
+        assert pgs["rollout"] is None

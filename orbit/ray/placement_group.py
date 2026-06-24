@@ -122,12 +122,20 @@ def create_placement_groups(args):
     }
 
 def create_opd_placement_groups(args):
-    """Create placement groups for student (actor), teacher, and rollout engines."""
+    """Create placement groups for student (actor), teacher, and rollout engines.
+
+    colocate=True: all three roles (actor, teacher, rollout) share the SAME
+    placement group bundles. This is the only colocate mode supported currently.
     
+    TODO: partial-colocate option
+
+    GPU layout (non-colocate, non-debug):
+        [0 .. actor_gpus) -> actor
+        [actor_gpus .. actor_gpus + teacher_gpus) -> teacher
+        [actor_gpus + teacher_gpus .. total) -> rollout
+    """
     if args.use_critic:
         raise NotImplementedError("Critic is not supported for OPD training.")
-    if getattr(args, "colocate", False):
-        raise NotImplementedError("Colocate is not supported for OPD training.")
 
     actor_gpus = args.actor_num_nodes * args.actor_num_gpus_per_node
 
@@ -139,21 +147,29 @@ def create_opd_placement_groups(args):
         num_gpus = args.rollout_num_gpus
         teacher_offset = None
         rollout_offset = 0
+    elif args.colocate:
+        num_gpus = actor_gpus
+        teacher_offset = 0
+        rollout_offset = 0
     else:
         teacher_gpus = args.opd_teacher_num_gpus
         num_gpus = actor_gpus + teacher_gpus + args.rollout_num_gpus
         teacher_offset = actor_gpus
         rollout_offset = actor_gpus + teacher_gpus
 
-    logger.info(f"Creating OPD placement group with {num_gpus} GPUs "
-                f"(actor={actor_gpus if not args.debug_rollout_only else 0}, "
-                f"teacher={args.opd_teacher_num_gpus if not (args.debug_train_only or args.debug_rollout_only) else 0}, "
-                f"rollout={args.rollout_num_gpus if not args.debug_train_only else 0})...")
+    logger.info(
+        f"Creating OPD placement group with {num_gpus} GPUs "
+        f"(colocate={getattr(args, 'colocate', False)}, "
+        f"actor={actor_gpus if not args.debug_rollout_only else 0}, "
+        f"teacher={args.opd_teacher_num_gpus if not (args.debug_train_only or args.debug_rollout_only or args.colocate) else (actor_gpus if args.colocate else 0)}, "
+        f"rollout={args.rollout_num_gpus if not args.debug_train_only and not args.colocate else (actor_gpus if args.colocate else 0)})..."
+    )
 
     pg, bundle_indices, gpu_ids = _create_placement_group(num_gpus)
 
     if args.debug_train_only:
-        return {"actor": (pg, bundle_indices, gpu_ids),
+        return {
+            "actor": (pg, bundle_indices, gpu_ids),
             "teacher": None,
             "rollout": None,
         }
@@ -165,11 +181,17 @@ def create_opd_placement_groups(args):
             "rollout": (pg, bundle_indices, gpu_ids),
         }
 
+    if args.colocate:
+        return {
+            "actor": (pg, bundle_indices, gpu_ids),
+            "teacher": (pg, bundle_indices, gpu_ids),
+            "rollout": (pg, bundle_indices, gpu_ids),
+        }
+
     return {
         "actor": (pg, bundle_indices[:teacher_offset], gpu_ids[:teacher_offset]),
         "teacher": (pg, bundle_indices[teacher_offset:rollout_offset], gpu_ids[teacher_offset:rollout_offset]),
-        "rollout": (pg, bundle_indices[rollout_offset:], gpu_ids[rollout_offset:],
-),
+        "rollout": (pg, bundle_indices[rollout_offset:], gpu_ids[rollout_offset:]),
     }
     
 
