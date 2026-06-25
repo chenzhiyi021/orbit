@@ -30,6 +30,10 @@ def _teacher_args(args):
     """
     teacher_args = copy.copy(args)
     teacher_args.hf_checkpoint = args.opd_teacher_model_path
+    if getattr(args, "colocate", False):
+        teacher_args.sglang_mem_fraction_static = getattr(
+            args, "opd_teacher_mem_fraction_static", 0.1
+        )
     return teacher_args
 
 
