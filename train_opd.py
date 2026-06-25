@@ -3,6 +3,7 @@ import contextlib
 import logging
 import time
 
+import torch
 import ray
 from sglang.srt.constants import (
     GPU_MEMORY_TYPE_CUDA_GRAPH,
@@ -87,6 +88,8 @@ async def train(args):
     # Teacher inference server
     with _timed_block("startup", "create teacher manager", timing_raw=startup_timing):
         teacher_server = create_teacher_manager(args, pgs["teacher"])
+        num_engines = ray.get(teacher_server.num_engines.remote())
+        logger.info(f"Teacher manager ready with {num_engines} engine(s).")
 
     if args.offload_rollout:
         async with _timed_phase("startup", "onload rollout weights", timing_raw=startup_timing):
@@ -163,10 +166,6 @@ async def train(args):
                 await rollout_manager.offload.remote(tags=offload_tags)
 
         # --- Step 2: Teacher scores student tokens ---
-        #
-        # teacher_server runs on dedicated GPUs; scoring is independent of
-        # rollout and training GPUs so no memory conflict.
-        #
         # NOTE: rollout_data["tokens"] is a ragged list of list[int] (samples
         # are NOT pre-padded to a common length -- confirmed via
         # RolloutManager._convert_samples_to_train_data, which builds
@@ -180,16 +179,24 @@ async def train(args):
         # MOPD extension point: replace single score.remote() with a routing
         # layer that dispatches to multiple teachers by domain/task.
         async with _timed_phase(prefix, "teacher score", timing_raw=timing_raw):
-            teacher_output_ref = await teacher_server.score.remote(rollout_data_ref)
-            # rollout_data = ray.get(rollout_data_ref)
-            # teacher_output = ray.get(
-            #     teacher_server.score.remote(rollout_data["tokens"])
-            # )
+            # teacher_output = await teacher_server.score.remote(rollout_data_ref)
+            opd_data_refs = []
+            for ref in rollout_data_ref:
+                rd = ray.get(ref.inner)
+                raw_tokens = rd["tokens"]
+                max_len = max(len(t) for t in raw_tokens)
+                pad_token_id = 0  # TODO
+                token_ids = torch.tensor([t + [pad_token_id]*(max_len-len(t)) for t in raw_tokens])
+                attention_mask = torch.tensor([[1]*len(t) + [0]*(max_len-len(t)) for t in raw_tokens])
+                teacher_output = ray.get(teacher_server.score.remote(token_ids, attention_mask))
+                rd = merge_teacher_signal(rd, teacher_output)
+                opd_data_refs.append(Box(ray.put(rd)))
+            opd_data_ref = opd_data_refs
 
-        # Merge teacher signal into rollout data
-        with _timed_block(prefix, "merge teacher signal", timing_raw=timing_raw):
-            opd_data = merge_teacher_signal(rollout_data, teacher_output)
-            opd_data_ref = ray.put(opd_data)
+        # # Merge teacher signal into rollout data
+        # with _timed_block(prefix, "merge teacher signal", timing_raw=timing_raw):
+        #     opd_data = merge_teacher_signal(rollout_data, teacher_output)
+        #     opd_data_ref = ray.put(opd_data)
 
         # --- Step 3: Student trains on (rollout + teacher signal) ---
         #
