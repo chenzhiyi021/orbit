@@ -30,6 +30,7 @@ from orbit.utils.metric_utils import compute_rollout_step
 from orbit.utils.misc import should_run_periodic_action
 from orbit.utils.tracking_utils import init_tracking
 from orbit.utils.training_eta import TrainingETA, format_duration
+from orbit.utils.ray_utils import Box
 
 logger = logging.getLogger(__name__)
 
@@ -88,8 +89,12 @@ async def train(args):
     # Teacher inference server
     with _timed_block("startup", "create teacher manager", timing_raw=startup_timing):
         teacher_server = create_teacher_manager(args, pgs["teacher"])
-        num_engines = ray.get(teacher_server.num_engines.remote())
-        logger.info(f"Teacher manager ready with {num_engines} engine(s).")
+        try:
+            num_engines = ray.get(teacher_server.num_engines.remote(), timeout=600)
+            logger.info(f"Teacher manager ready with {num_engines} engine(s).")
+        except ray.exceptions.GetTimeoutError:
+            logger.error("Teacher manager failed to initialize within 600s.")
+            raise
 
     if args.offload_rollout:
         async with _timed_phase("startup", "onload rollout weights", timing_raw=startup_timing):

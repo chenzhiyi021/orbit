@@ -53,6 +53,7 @@ print_parity_check_summary() {
 
 run_training_driver() {
     # Keep the argv list below in sync with the python3 invocation further down.
+    declare -n _algo_args_ref="${ALGO_ARGS}" 
     if is_true "${ORBIT_DRY_RUN_ARGV:-0}"; then
         printf '%s\n' \
             "${ORBIT_ENTRYPOINT}" \
@@ -63,7 +64,7 @@ run_training_driver() {
             "${CKPT_ARGS[@]}" \
             "${ROLLOUT_ARGS[@]}" \
             "${OPTIMIZER_ARGS[@]}" \
-            "${RL_ARGS[@]}" \
+            "${_algo_args_ref[@]}" \
             "${LOSS_ARGS[@]}" \
             "${WANDB_ARGS[@]}" \
             "${PERF_ARGS[@]}" \
@@ -88,7 +89,7 @@ run_training_driver() {
        "${CKPT_ARGS[@]}" \
        "${ROLLOUT_ARGS[@]}" \
        "${OPTIMIZER_ARGS[@]}" \
-       "${RL_ARGS[@]}" \
+       "${_algo_args_ref[@]}" \
        "${LOSS_ARGS[@]}" \
        "${WANDB_ARGS[@]}" \
        "${PERF_ARGS[@]}" \

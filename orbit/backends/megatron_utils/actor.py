@@ -577,7 +577,7 @@ class MegatronTrainRayActor(TrainRayActor):
             # Set loss_type so Megatron's loss function picks the OPD path.
             # The loss function in model.py reads args.loss_type to decide
             # whether to compute GRPO advantage loss or OPD KL loss.
-            self.args.loss_type = f"opd_{self.args.opd_loss_type}"
+            # self.args.loss_type = f"opd_{self.args.opd_loss_type}"
 
             self._set_replay_stage("replay_backward")
             with timer("actor_train"):

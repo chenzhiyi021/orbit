@@ -32,7 +32,7 @@ def _teacher_args(args):
     teacher_args.hf_checkpoint = args.opd_teacher_model_path
     if getattr(args, "colocate", False):
         teacher_args.sglang_mem_fraction_static = getattr(
-            args, "opd_teacher_mem_fraction_static", 0.1
+            args, "opd_teacher_mem_fraction_static", 0.25
         )
     return teacher_args
 
@@ -255,7 +255,7 @@ def create_teacher_manager(args, pg) -> "ray.actor.ActorHandle":
     pg_obj, bundle_indices, _ = pg
  
     server = TeacherManager.options(
-        num_cpus=1,
+        num_cpus=0.1,
         num_gpus=0,
         scheduling_strategy=PlacementGroupSchedulingStrategy(
             placement_group=pg_obj,

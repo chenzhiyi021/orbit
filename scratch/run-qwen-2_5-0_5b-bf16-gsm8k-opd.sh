@@ -89,7 +89,6 @@ OPD_ARGS=(
     --opd-teacher-model-path "${OPD_TEACHER_CKPT}"
     --opd-teacher-num-gpus 1
     --opd-teacher-tp-size 1
-    --opd-loss-type sampled_token
     --opd-rl-coef 0.0
 )
 
