@@ -421,6 +421,9 @@ def train_one_step(
                 "advantages",
                 "returns",
                 "rollout_log_probs",
+                # TODO: find a better way to add this to the batch.
+                # NOTE: would this affect RL?
+                "teacher_log_probs",
                 "max_seq_lens",
             ],
             args.data_pad_size_multiplier,

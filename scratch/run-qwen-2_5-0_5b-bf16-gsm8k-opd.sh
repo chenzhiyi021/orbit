@@ -91,7 +91,7 @@ OPD_ARGS=(
     --opd-teacher-tp-size 1
     --opd-rl-coef 0.0
     --loss-type custom_loss
-    --custom-loss-function-path "${ORBIT_ROOT}.orbit.backends.training_utils.opd_loss.opd_loss_function"
+    --custom-loss-function-path "orbit.backends.training_utils.opd_loss.opd_loss_function"
 )
 
 LOSS_ARGS=(

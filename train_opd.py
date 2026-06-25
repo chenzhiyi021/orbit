@@ -183,18 +183,61 @@ async def train(args):
         #
         # MOPD extension point: replace single score.remote() with a routing
         # layer that dispatches to multiple teachers by domain/task.
+        # --- Step 2: Teacher scores student tokens ---
+        #
+        # OPD only needs teacher log-probs on the RESPONSE tokens, not the
+        # prompt -- get_log_probs_and_entropy() confirms student_log_probs
+        # is response-only (shape [R] per sample; docstring: "Compute
+        # per-token log-probabilities ... on responses"). But the teacher
+        # must still be SHOWN the full prompt+response sequence so that
+        # each response token's logprob is correctly conditioned on the
+        # prompt -- scoring response tokens alone would make the teacher's
+        # first-token logprob meaningless (no context), not just shift an
+        # index. So: send the FULL sequence to score(), then slice the
+        # RESPONSE-aligned portion of the result before merging, to match
+        # student_log_probs's shape.
         async with _timed_phase(prefix, "teacher score", timing_raw=timing_raw):
-            # teacher_output = await teacher_server.score.remote(rollout_data_ref)
             opd_data_refs = []
             for ref in rollout_data_ref:
                 rd = ray.get(ref.inner)
                 raw_tokens = rd["tokens"]
+                total_lengths = rd["total_lengths"]
+                response_lengths = rd["response_lengths"]
+
                 max_len = max(len(t) for t in raw_tokens)
-                pad_token_id = 0  # TODO
-                token_ids = torch.tensor([t + [pad_token_id]*(max_len-len(t)) for t in raw_tokens])
-                attention_mask = torch.tensor([[1]*len(t) + [0]*(max_len-len(t)) for t in raw_tokens])
+                pad_token_id = 0  # TODO: use the real tokenizer.pad_token_id, not hardcoded 0
+                token_ids = torch.tensor(
+                    [t + [pad_token_id] * (max_len - len(t)) for t in raw_tokens]
+                )
+                attention_mask = torch.tensor(
+                    [[1] * len(t) + [0] * (max_len - len(t)) for t in raw_tokens]
+                )
+
                 teacher_output = ray.get(teacher_server.score.remote(token_ids, attention_mask))
-                rd = merge_teacher_signal(rd, teacher_output)
+                full_teacher_log_probs = teacher_output["teacher_log_probs"]  # [B, max_len], full seq
+
+                # Slice each sample's full-sequence teacher_log_probs down to
+                # just the response-aligned span (the last response_length
+                # positions before total_length), matching student_log_probs.
+                # NOTE: this assumes response tokens are the trailing segment
+                # of "tokens" (prompt first, then generated response) -- the
+                # standard rollout convention, not re-verified here.
+                response_teacher_log_probs = [
+                    full_teacher_log_probs[i, total_len - resp_len : total_len]
+                    for i, (total_len, resp_len) in enumerate(
+                        zip(total_lengths, response_lengths, strict=False)
+                    )
+                ]
+
+                # NOTE: unlike the previous full-sequence version, position 0
+                # of each response_teacher_log_probs entry is NOT guaranteed
+                # to be nan anymore -- it's the first response token, scored
+                # with the real prompt as context, so it should be a valid
+                # logprob. train_student()'s "mask position 0" logic was
+                # written for the old (prompt-included, nan-at-position-0)
+                # convention and likely needs to be revisited/removed; not
+                # changed here since that's a separate decision.
+                rd = merge_teacher_signal(rd, {"teacher_log_probs": response_teacher_log_probs})
                 opd_data_refs.append(Box(ray.put(rd)))
             opd_data_ref = opd_data_refs
 
