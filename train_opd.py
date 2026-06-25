@@ -32,40 +32,10 @@ from orbit.utils.tracking_utils import init_tracking
 from orbit.utils.training_eta import TrainingETA, format_duration
 from orbit.utils.ray_utils import Box
 
+# TODO: should be moved to utils
+from train import _timed_phase, _timed_block
+
 logger = logging.getLogger(__name__)
-
-
-@contextlib.asynccontextmanager
-async def _timed_phase(prefix: str, name: str, *, timing_raw: dict | None = None, start_extra: str = ""):
-    if start_extra:
-        logger.info("%s: %s start %s", prefix, name, start_extra)
-    else:
-        logger.info("%s: %s start", prefix, name)
-    t0 = time.monotonic()
-    try:
-        yield
-    finally:
-        elapsed = time.monotonic() - t0
-        logger.info("%s: %s done elapsed=%.2fs", prefix, name, elapsed)
-        if timing_raw is not None:
-            timing_raw[name] = timing_raw.get(name, 0.0) + elapsed
-
-
-@contextlib.contextmanager
-def _timed_block(prefix: str, name: str, *, timing_raw: dict | None = None, start_extra: str = ""):
-    if start_extra:
-        logger.info("%s: %s start %s", prefix, name, start_extra)
-    else:
-        logger.info("%s: %s start", prefix, name)
-    t0 = time.monotonic()
-    try:
-        yield
-    finally:
-        elapsed = time.monotonic() - t0
-        logger.info("%s: %s done elapsed=%.2fs", prefix, name, elapsed)
-        if timing_raw is not None:
-            timing_raw[name] = timing_raw.get(name, 0.0) + elapsed
-
 
 async def train(args):
     configure_logger()
@@ -89,12 +59,6 @@ async def train(args):
     # Teacher inference server
     with _timed_block("startup", "create teacher manager", timing_raw=startup_timing):
         teacher_server = create_teacher_manager(args, pgs["teacher"])
-        try:
-            num_engines = ray.get(teacher_server.num_engines.remote(), timeout=600)
-            logger.info(f"Teacher manager ready with {num_engines} engine(s).")
-        except ray.exceptions.GetTimeoutError:
-            logger.error("Teacher manager failed to initialize within 600s.")
-            raise
 
     if args.offload_rollout:
         async with _timed_phase("startup", "onload rollout weights", timing_raw=startup_timing):
