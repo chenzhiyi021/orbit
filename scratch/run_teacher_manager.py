@@ -75,10 +75,6 @@ def test_score_single(manager, args):
 
 
 def test_merge_teacher_signal_structure(manager, args):
-    """Verify the shape/structure train_student() assumes for
-    rollout_data["teacher_log_probs"], using merge_teacher_signal() the
-    same way train_opd.py does -- not just score()'s raw return value.
-    """
     from orbit.ray.teacher import merge_teacher_signal
     from transformers import AutoTokenizer
 
@@ -86,63 +82,34 @@ def test_merge_teacher_signal_structure(manager, args):
 
     tokenizer = AutoTokenizer.from_pretrained(args.opd_teacher_model_path)
 
-    # Two prompts of DIFFERENT lengths -- this is the case that matters for
-    # train_student()'s masking logic, since rollout_data in real training
-    # holds a *batch* of sequences, not a single one, and they are not
-    # guaranteed to be the same length before padding.
     prompts = ["The capital of France is", "Hi"]
-    encoded_list = [tokenizer(p)["input_ids"] for p in prompts]
-    print(f"Prompt lengths: {[len(e) for e in encoded_list]}")
+    enc = tokenizer(prompts, padding=True, return_tensors="pt")
+    token_ids = enc["input_ids"]
+    attention_mask = enc["attention_mask"]
+    print(f"Prompt lengths (real, via attention_mask): {attention_mask.sum(dim=1).tolist()}")
 
-    # score() as currently written takes a single [B, T] tensor, which
-    # requires equal-length sequences. To test unequal lengths we call it
-    # once per sequence here -- this also mirrors how score() would need to
-    # be extended if it doesn't already handle ragged batches internally.
-    per_sample_log_probs = []
-    for encoded in encoded_list:
-        token_ids = torch.tensor([encoded])
-        attention_mask = torch.ones_like(token_ids)
-        result = ray.get(manager.score.remote(token_ids, attention_mask))
-        log_probs = result["teacher_log_probs"]
-        print(f"  len={len(encoded)} -> teacher_log_probs shape={log_probs.shape}, "
-              f"first_val={log_probs[0].item()}")
-        # score() returns a [1, T] or [T] tensor for a single sequence --
-        # squeeze batch dim if present so per_sample_log_probs holds 1D
-        # tensors, matching what train_student() iterates over.
-        per_sample_log_probs.append(log_probs.squeeze(0) if log_probs.dim() > 1 else log_probs)
+    result = ray.get(manager.score.remote(token_ids, attention_mask))
+    log_probs = result["teacher_log_probs"]
+    print(f"score() returned shape: {log_probs.shape}")
 
-    # Build a minimal rollout_data dict the way train_opd.py would, then run
-    # it through merge_teacher_signal() to confirm the key name and shape
-    # train_student() will actually see.
     rollout_data = {
-        "tokens": encoded_list,
-        "loss_masks": [[1] * len(e) for e in encoded_list],
+        "tokens": [token_ids[i].tolist() for i in range(token_ids.shape[0])],
+        "loss_masks": [mask.tolist() for mask in attention_mask],
     }
-    teacher_output = {"teacher_log_probs": per_sample_log_probs}
+    teacher_output = {"teacher_log_probs": log_probs}
     merged = merge_teacher_signal(rollout_data, teacher_output)
 
     print(f"\nmerged keys: {list(merged.keys())}")
-    print(f"merged['teacher_log_probs'] type: {type(merged['teacher_log_probs'])}")
-    print(f"merged['teacher_log_probs'] length: {len(merged['teacher_log_probs'])}")
-    for i, lp in enumerate(merged["teacher_log_probs"]):
-        print(f"  seq {i}: type={type(lp)}, shape={getattr(lp, 'shape', 'N/A')}, "
-              f"first_val={lp[0].item() if hasattr(lp, '__getitem__') else lp}, "
-              f"is_first_nan={torch.isnan(lp[0]).item() if hasattr(lp, '__getitem__') else 'N/A'}")
+    print(f"merged['teacher_log_probs'] shape: {merged['teacher_log_probs'].shape}")
 
-    # This is exactly the assumption train_student()'s masking code makes:
-    # rollout_data["teacher_log_probs"] is a list, one 1D tensor per
-    # sequence, and the first element of each is nan. Confirm or refute it
-    # here before trusting that masking code.
-    print("\n--- Assumption check for train_student() masking logic ---")
-    is_list = isinstance(merged["teacher_log_probs"], list)
-    print(f"Is a list (not a single stacked tensor): {is_list}")
-    if is_list:
-        all_first_nan = all(
-            torch.isnan(lp[0]).item() for lp in merged["teacher_log_probs"] if len(lp) > 0
+    print("\n--- Assumption check ---")
+    for i in range(merged["teacher_log_probs"].shape[0]):
+        lp = merged["teacher_log_probs"][i]
+        real_len = attention_mask[i].sum().item()
+        print(
+            f"  seq {i}: first_is_nan={torch.isnan(lp[0]).item()}, "
+            f"padded_region_is_nan={torch.isnan(lp[real_len:]).all().item() if real_len < lp.shape[0] else 'N/A'}"
         )
-        print(f"All sequences have nan at position 0: {all_first_nan}")
-        all_indexable = all(hasattr(lp, "__setitem__") for lp in merged["teacher_log_probs"])
-        print(f"All sequences support item assignment (lp[0] = 0.0 will work): {all_indexable}")
 
     print("=== merge_teacher_signal structure test complete ===")
 

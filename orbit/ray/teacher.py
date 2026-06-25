@@ -135,13 +135,27 @@ class TeacherManager:
 
     def score(self, token_ids: torch.Tensor, attention_mask: torch.Tensor) -> dict:
         """
-        Return:
-            {"teacher_log_probs": List[Tensor[T_i]]}
-            OR optionally padded Tensor[B, T] if you choose later
-        """
+        Score a batch of student rollout sequences with the teacher model.
 
+        Args:
+            token_ids:      LongTensor [B, T] -- may include right-padding
+            attention_mask: LongTensor [B, T] -- 1 for real tokens, 0 for padding
+
+        Returns:
+            dict: {"teacher_log_probs": Tensor [B, T]}. Position 0 of every
+            sequence is nan (no preceding context). Padded positions (where
+            attention_mask == 0) are ALSO set to nan, since SGLang is only
+            sent each sample's real (unpadded) tokens -- it has no concept of
+            attention_mask itself. Callers (train_student) must mask using
+            attention_mask before these values reach the loss, the same way
+            position-0 nan is already handled.
+        """
         with torch.no_grad():
-            input_ids_list = token_ids.cpu().tolist()  # [B, T]
+            seq_lens = attention_mask.sum(dim=1).tolist()
+            input_ids_list = [
+                token_ids[i, : seq_lens[i]].cpu().tolist()
+                for i in range(token_ids.shape[0])
+            ]
 
             payload = {
                 "input_ids": input_ids_list,
@@ -159,49 +173,41 @@ class TeacherManager:
                 response = requests.post(url, json=payload, timeout=30.0)
                 response.raise_for_status()
                 result = response.json()
-
             except requests.exceptions.RequestException as e:
                 logger.error(f"Teacher score HTTP request failed: {e}")
                 raise
 
-        # =========================
-        # 1. normalize batch format
-        # =========================
-        if not isinstance(result, list):
-            result = [result]
+            if not isinstance(result, list):
+                result = [result]
 
-        # =========================
-        # 2. parse each sample
-        # =========================
-        teacher_log_probs_list = []
+            max_len = token_ids.shape[1]
+            teacher_log_probs_list = []
+            for i, r in enumerate(result):
+                meta = r.get("meta_info", {})
+                raw_entries = meta.get("input_token_logprobs", None)
+                if raw_entries is None:
+                    raise ValueError(f"Missing input_token_logprobs in {meta.keys()}")
 
-        for r in result:
-            meta = r.get("meta_info", {})
+                log_probs = [
+                    entry[0] if entry[0] is not None else float("nan")
+                    for entry in raw_entries
+                ]
+                log_probs_tensor = torch.tensor(log_probs, dtype=torch.float32)
 
-            raw_entries = meta.get("input_token_logprobs", None)
+                # Pad back up to max_len with nan, matching the original
+                # (unpadded) length we sent for this sample, seq_lens[i].
+                if log_probs_tensor.shape[0] < max_len:
+                    pad = torch.full(
+                        (max_len - log_probs_tensor.shape[0],),
+                        float("nan"),
+                        dtype=torch.float32,
+                    )
+                    log_probs_tensor = torch.cat([log_probs_tensor, pad])
 
-            print(f"Raw entries: {raw_entries}")
-            print(f"Raw entries type: {type(raw_entries)}")
+                teacher_log_probs_list.append(log_probs_tensor)
 
-            if raw_entries is None:
-                raise ValueError(f"Missing input_token_logprobs in {meta.keys()}")
-
-            teacher_log_probs = [
-                entry[0] if entry[0] is not None else float("nan")
-                for entry in raw_entries
-            ]
-            print(f"Teacher log probs: {teacher_log_probs_list=}")
-            teacher_log_probs_list.append(
-                torch.tensor(teacher_log_probs, dtype=torch.float32)
-            )
-
-        # =========================
-        # 3. return batch-safe format
-        # =========================
-        teacher_log_probs_tensor = torch.stack(teacher_log_probs_list)
-        return {
-            "teacher_log_probs": teacher_log_probs_tensor
-        }
+            teacher_log_probs_tensor = torch.stack(teacher_log_probs_list)
+            return {"teacher_log_probs": teacher_log_probs_tensor}
  
     def _extract_logprobs_from_logprobs_field(self, logprobs_list):
         """
