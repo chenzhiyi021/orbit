@@ -135,31 +135,8 @@ async def train(args):
                 await rollout_manager.offload.remote(tags=offload_tags)
 
         # --- Step 2: Teacher scores student tokens ---
-        # NOTE: rollout_data["tokens"] is a ragged list of list[int] (samples
-        # are NOT pre-padded to a common length -- confirmed via
-        # RolloutManager._convert_samples_to_train_data, which builds
-        # "tokens" as [sample.tokens for sample in samples] without padding).
-        # score() accepts this directly: SGLang's /generate endpoint takes
-        # input_ids as a list of lists and does not require a rectangular
-        # batch, so there is no separate "attention_mask" concept here
-        # (unlike padded-tensor APIs) -- each sequence's real length is just
-        # its own list length.
-        #
         # MOPD extension point: replace single score.remote() with a routing
         # layer that dispatches to multiple teachers by domain/task.
-        # --- Step 2: Teacher scores student tokens ---
-        #
-        # OPD only needs teacher log-probs on the RESPONSE tokens, not the
-        # prompt -- get_log_probs_and_entropy() confirms student_log_probs
-        # is response-only (shape [R] per sample; docstring: "Compute
-        # per-token log-probabilities ... on responses"). But the teacher
-        # must still be SHOWN the full prompt+response sequence so that
-        # each response token's logprob is correctly conditioned on the
-        # prompt -- scoring response tokens alone would make the teacher's
-        # first-token logprob meaningless (no context), not just shift an
-        # index. So: send the FULL sequence to score(), then slice the
-        # RESPONSE-aligned portion of the result before merging, to match
-        # student_log_probs's shape.
         async with _timed_phase(prefix, "teacher score", timing_raw=timing_raw):
             opd_data_refs = []
             for ref in rollout_data_ref:

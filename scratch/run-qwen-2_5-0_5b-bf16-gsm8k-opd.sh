@@ -130,7 +130,7 @@ EVAL_ARGS=(
 
 SGLANG_ARGS=(
     --rollout-num-gpus-per-engine 1
-    --sglang-mem-fraction-static 0.5
+    --sglang-mem-fraction-static 0.3
     --rollout-num-gpus 1
     --sglang-max-running-requests 1024
     --router-disable-circuit-breaker

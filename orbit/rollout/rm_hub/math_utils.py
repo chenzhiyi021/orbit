@@ -480,7 +480,9 @@ def grade_answer_verl(solution_str, ground_truth):
     if not ground_truth:
         return False
     ground_truth = str(ground_truth)
-    if "\\boxed" in ground_truth:
+    if "####" in ground_truth:
+        ground_truth = ground_truth.split("####")[-1].strip()
+    elif "\\boxed" in ground_truth:
         ground_truth = extract_answer(ground_truth)
     given_answer = extract_answer(solution_str)
     if given_answer is None:
