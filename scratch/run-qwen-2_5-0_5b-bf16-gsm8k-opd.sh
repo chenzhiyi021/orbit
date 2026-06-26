@@ -29,7 +29,7 @@ TEST_JSONL="/mnt/L202500431/datasets/gsm8k/main/test-00000-of-00001.parquet"
 
 # Teacher checkpoint -- MUST be same-family (same tokenizer/vocab) as the
 # student checkpoint above.
-OPD_TEACHER_CKPT="/mnt/L202500431/models/qwen2.5-3b-instruct"
+OPD_TEACHER_CKPT="/mnt/L202500431/models/qwen2.5-1.5b-instruct"
 # : "${OPD_TEACHER_CKPT:?set OPD_TEACHER_CKPT to a Hugging Face checkpoint path}"
 
 # === Resources ===
@@ -41,8 +41,8 @@ source "${ORBIT_ROOT}/orbit_plugins/model_args/qwen2.5-0.5B.sh"   # provides MOD
 
 # === Training schedule ===
 TOTAL_EPOCHS="${TOTAL_EPOCHS:-15}"
-ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-128}"
-N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-4}"
+ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-32}"
+N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-2}"
 GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-64}"
 TRAIN_ROWS=${TRAIN_ROWS:-$(wc -l < "${TRAIN_JSONL}")}
 NUM_ROLLOUT=${NUM_ROLLOUT:-$(( (TRAIN_ROWS * TOTAL_EPOCHS + ROLLOUT_BATCH_SIZE - 1) / ROLLOUT_BATCH_SIZE ))}
@@ -130,7 +130,7 @@ EVAL_ARGS=(
 
 SGLANG_ARGS=(
     --rollout-num-gpus-per-engine 1
-    --sglang-mem-fraction-static 0.60
+    --sglang-mem-fraction-static 0.5
     --rollout-num-gpus 1
     --sglang-max-running-requests 1024
     --router-disable-circuit-breaker
@@ -144,7 +144,7 @@ MISC_ARGS=(
     --attention-softmax-in-fp32
     --no-offload-train
     --no-offload-train-async
-    --offload-rollout
+    --no-offload-rollout 
     --cuda-graph-impl local
     --cuda-graph-scope full_iteration
     --te-rng-tracker

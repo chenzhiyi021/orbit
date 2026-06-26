@@ -13,10 +13,10 @@ fi
 export ORBIT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 echo "ORBIT_ROOT: ${ORBIT_ROOT}"
 
-source "${ORBIT_ROOT}/orbit_plugins/model_args/qwen2.5-0.5B.sh" 
+source "${ORBIT_ROOT}/orbit_plugins/model_args/qwen2.5-1.5B.sh" 
 
 
-HF_CKPT="/mnt/L202500431/models/qwen2.5-0.5b-instruct"
+HF_CKPT="/mnt/L202500431/models/qwen2.5-1.5b-instruct"
 
 
 RAY_NUM_GPUS=1
