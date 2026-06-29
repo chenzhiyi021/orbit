@@ -121,7 +121,6 @@ async def train(args):
             async with _timed_phase(prefix, "eval-before-train", timing_raw=timing_raw):
                 await rollout_manager.eval.remote(rollout_id)
 
-        # --- Step 1: Student generates rollouts ---
         async with _timed_phase(prefix, "generate", timing_raw=timing_raw):
             rollout_data_ref = await rollout_manager.generate.remote(rollout_id)
 
@@ -131,10 +130,15 @@ async def train(args):
                 offload_tags.append(GPU_MEMORY_TYPE_KV_CACHE)
             if "weight" in args.offload_rollout_level:
                 offload_tags.append(GPU_MEMORY_TYPE_WEIGHTS)
-            async with _timed_phase(prefix, "offload rollout", timing_raw=timing_raw):
+            async with _timed_phase(
+                prefix, "offload rollout", timing_raw=timing_raw, start_extra=f"tags={offload_tags}"
+            ):
                 await rollout_manager.offload.remote(tags=offload_tags)
 
-        # --- Step 2: Teacher scores student tokens ---
+        if args.offload_train and args.offload_train_async:
+            async with _timed_phase(prefix, "prefetch train state", timing_raw=timing_raw):
+                await actor_model.prefetch_train_state(rollout_id)
+
         # MOPD extension point: replace single score.remote() with a routing
         # layer that dispatches to multiple teachers by domain/task.
         async with _timed_phase(prefix, "teacher score", timing_raw=timing_raw):
@@ -146,7 +150,7 @@ async def train(args):
                 response_lengths = rd["response_lengths"]
 
                 max_len = max(len(t) for t in raw_tokens)
-                pad_token_id = 0  # TODO: use the real tokenizer.pad_token_id, not hardcoded 0
+                pad_token_id = 0 
                 token_ids = torch.tensor(
                     [t + [pad_token_id] * (max_len - len(t)) for t in raw_tokens]
                 )
@@ -155,7 +159,7 @@ async def train(args):
                 )
 
                 teacher_output = ray.get(teacher_server.score.remote(token_ids, attention_mask))
-                full_teacher_log_probs = teacher_output["teacher_log_probs"]  # [B, max_len], full seq
+                full_teacher_log_probs = teacher_output["teacher_log_probs"]  # [B, max_len]
 
                 # Slice each sample's full-sequence teacher_log_probs down to
                 # just the response-aligned span (the last response_length
