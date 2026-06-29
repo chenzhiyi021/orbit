@@ -171,19 +171,7 @@ async def train(args):
 
                 rd = merge_teacher_signal(rd, {"teacher_log_probs": response_teacher_log_probs})
                 opd_data_refs.append(Box(ray.put(rd)))
-            # opd_data_ref = opd_data_refs
 
-        # # Merge teacher signal into rollout data
-        # with _timed_block(prefix, "merge teacher signal", timing_raw=timing_raw):
-        #     opd_data = merge_teacher_signal(rollout_data, teacher_output)
-        #     opd_data_ref = ray.put(opd_data)
-
-        # --- Step 3: Student trains on (rollout + teacher signal) ---
-        #
-        # actor_model.train() detects teacher keys in the data dict (see
-        # _is_opd_batch in orbit/backends/megatron_utils/actor.py) and
-        # routes to train_student(), which masks out the nan at position 0
-        # of each teacher_log_probs entry before it reaches the loss.
         async with _timed_phase(prefix, "actor train", timing_raw=timing_raw):
             await actor_model.train(rollout_id, opd_data_refs)
 
