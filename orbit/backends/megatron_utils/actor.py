@@ -513,13 +513,8 @@ class MegatronTrainRayActor(TrainRayActor):
 
         with inverse_timer("train_wait"), timer("train"):
 
-            rollout_data.update(
-                self.compute_log_prob(data_iterator, num_microbatches, store_prefix="")
-            )
-
             log_rollout_data(rollout_id, self.args, rollout_data)
 
-            self._set_replay_stage("replay_backward")
             with timer("actor_train"):
                 train(
                     rollout_id,
@@ -536,16 +531,6 @@ class MegatronTrainRayActor(TrainRayActor):
 
         if should_backup_actor_after_train(self.args):
             self.model_state_manager.backup("actor")
-
-        if (
-            self.args.ref_update_interval is not None
-            and (rollout_id + 1) % self.args.ref_update_interval == 0
-            and "ref" in self.model_state_manager.backup_tags
-        ):
-            with timer("ref_model_update"):
-                if is_megatron_main_rank():
-                    logger.info(f"Updating ref model at rollout_id {rollout_id}")
-                self.model_state_manager.backup("ref")
 
         log_perf_data(rollout_id, self.args)
 
