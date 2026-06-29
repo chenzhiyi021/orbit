@@ -41,7 +41,6 @@ class TeacherManager:
     Public API:
         score(token_ids, attention_mask) -> dict
         offload() / onload()             -> GPU memory management
-        num_engines()                    -> int, for tests/health checks
     """
 
     def __init__(self, args, pg):
@@ -49,8 +48,8 @@ class TeacherManager:
 
         self.args = args
         self.pg = pg
-        self.loss_type = getattr(args, "opd_loss_type", "sampled_token")
-        self.topk_k = getattr(args, "opd_topk_k", 32)
+        # self.loss_type = getattr(args, "opd_loss_type", "sampled_token")
+        # self.topk_k = getattr(args, "opd_topk_k", 32)
 
         pg_obj, bundle_indices, gpu_ids = pg
         tp_size = args.opd_teacher_tp_size
@@ -68,7 +67,6 @@ class TeacherManager:
 
             scheduling_strategy = PlacementGroupSchedulingStrategy(
                 placement_group=pg_obj,
-                placement_group_capture_child_tasks=True,
                 placement_group_bundle_index=bundle_index,
             )
             engine = ray.remote(SGLangEngine).options(
@@ -79,55 +77,42 @@ class TeacherManager:
             ).remote(
                 teacher_args,
                 rank=i,
-                worker_type="teacher",
+                worker_type="regular",
                 base_gpu_id=base_gpu_id,
                 sglang_overrides={},
                 num_gpus_per_engine=tp_size,
             )
             self._engines.append(engine)
 
-        # --- Allocate dist_init_addr / port / nccl_port for every engine ---
-        # engine.init() requires these as explicit arguments; they are not
-        # read off `args`. rollout_engines must be a list of (rank, engine)
-        # tuples, matching what _allocate_rollout_engine_addr_and_ports_normal
-        # and ServerGroup.start_engines() both expect.
         rollout_engines = list(enumerate(self._engines))
 
         addr_and_ports, _ = _allocate_rollout_engine_addr_and_ports_normal(
             args=teacher_args,
             rollout_engines=rollout_engines,
-            worker_type="teacher",
+            worker_type="regular",
             num_gpus_per_engine=tp_size,
             rank_offset=0,
             base_port=25000,  # offset from rollout's default 15000 to avoid collisions
         )
 
-        # --- Initialize engines (blocking, so teacher is ready before training starts) ---
-        # No router: teacher has no router_ip/router_port, so init() will not
-        # attempt to register with a router (see SGLangEngine._init_normal).
         init_handles = [
             engine.init.remote(**addr_and_ports[rank])
             for rank, engine in rollout_engines
         ]
         ray.get(init_handles)
 
-        # Cache rank-0's host/port for score() -- SGLangEngine does not expose
-        # a getter for these, and they cannot be read off the actor handle
-        # directly (Ray actor attributes are not externally readable).
-        # We already allocated them above, so record them here instead of
-        # querying the engine.
-        self._server_host = addr_and_ports[0]["host"]
-        self._server_port = addr_and_ports[0]["port"]
+        # Cache all engine host/port pairs for round-robin dispatch in score().
+        self._engine_addrs = [
+            (addr_and_ports[rank]["host"], addr_and_ports[rank]["port"])
+            for rank in range(num_engines)
+        ]
+        self._next_engine = 0  # round-robin cursor
 
         logger.info(
             f"TeacherManager ready: model={args.opd_teacher_model_path}, "
             f"tp_size={tp_size}, num_engines={num_engines}, "
-            f"loss_type={self.loss_type}, addr={self._server_host}:{self._server_port}"
+            # f"loss_type={self.loss_type}, addr={self._server_host}:{self._server_port}"
         )
-
-    def num_engines(self) -> int:
-        """Expose engine count for tests/health checks."""
-        return len(self._engines)
 
     def score(self, token_ids: torch.Tensor, attention_mask: torch.Tensor) -> dict:
         """
@@ -163,7 +148,9 @@ class TeacherManager:
                 "logprob_start_len": 0,
             }
 
-            url = f"http://{self._server_host}:{self._server_port}/generate"
+            host, port = self._engine_addrs[self._next_engine]
+            self._next_engine = (self._next_engine + 1) % len(self._engine_addrs)
+            url = f"http://{host}:{port}/generate"
 
             try:
                 response = requests.post(url, json=payload, timeout=30.0)
