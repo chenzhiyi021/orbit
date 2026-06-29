@@ -30,7 +30,7 @@ def opd_loss_function(args, batch, logits, sum_of_sample_mean):
 
     kl_advantage = [
         (t_lp - s_lp).detach()
-        for t_lp, s_lp in zip(teacher_log_probs, student_log_probs, strict=False)
+        for t_lp, s_lp in zip(teacher_log_probs, student_log_probs, strict=True)
     ]
 
     student_log_probs_cat = torch.cat(student_log_probs, dim=0)
@@ -42,7 +42,9 @@ def opd_loss_function(args, batch, logits, sum_of_sample_mean):
     if student_log_probs_cat.numel() == 0:
         loss = loss + 0 * logits.sum()
 
-    reverse_kl = sum_of_sample_mean(kl_advantage_cat.abs())
+    reverse_kl = sum_of_sample_mean(
+        student_log_probs_cat.exp().detach() * (-kl_advantage_cat)
+    )
 
     reported_loss = {
         "loss": loss.clone().detach(),
