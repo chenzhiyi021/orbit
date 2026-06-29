@@ -22,11 +22,6 @@ logger = logging.getLogger(__name__)
 
 def _teacher_args(args):
     """Shallow-copy args with hf_checkpoint swapped to the teacher checkpoint.
-
-    SGLangEngine's _compute_server_args always reads args.hf_checkpoint as
-    model_path -- there is no teacher-specific field it understands. This
-    is the smallest change that lets TeacherManager reuse SGLangEngine
-    unmodified.
     """
     teacher_args = copy.copy(args)
     teacher_args.hf_checkpoint = args.opd_teacher_model_path
@@ -41,10 +36,7 @@ def _teacher_args(args):
 class TeacherManager:
     """
     Ray actor wrapping SGLangEngine instances for frozen teacher inference.
-
-    One TeacherManager instance handles a single teacher model. For MOPD
-    with multiple teachers, instantiate one TeacherManager per teacher
-    model and route samples from train_opd.py.
+    One TeacherManager instance handles a single teacher model.
 
     Public API:
         score(token_ids, attention_mask) -> dict

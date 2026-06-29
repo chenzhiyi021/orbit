@@ -1747,6 +1747,12 @@ def get_orbit_extra_args_provider(add_custom_arguments=None):
                 default=0.0,
                 help="Coefficient for the RL loss in the combined OPD loss.",
             )
+            parser.add_argument(
+                "--opd_teacher_mem_fraction_static",
+                type=float,
+                default=0.25,
+                help="Static memory fraction for the teacher model.",
+            )
             return parser    
 
         def add_rollout_buffer_arguments(parser):
