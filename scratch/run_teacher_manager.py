@@ -25,8 +25,8 @@ def setup(args):
     # NOTE: __ray_ready__ is not a real, documented method we can rely on --
     # use num_engines() (defined on TeacherManager itself) instead, both to
     # block until __init__ finishes and to get a meaningful real value back.
-    num_engines = ray.get(manager.num_engines.remote())
-    print(f"TeacherManager initialized successfully! num_engines={num_engines}")
+    # num_engines = ray.get(manager.num_engines.remote())
+    print(f"TeacherManager initialized successfully!")
 
     return manager
 
@@ -128,6 +128,7 @@ def test_score_batch(manager, args):
     prompts = [
         "The capital of France is",
         "Hi",
+        "Hi there"
     ]
 
     enc = tokenizer(

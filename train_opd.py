@@ -161,12 +161,7 @@ async def train(args):
                 teacher_output = ray.get(teacher_server.score.remote(token_ids, attention_mask))
                 full_teacher_log_probs = teacher_output["teacher_log_probs"]  # [B, max_len]
 
-                # Slice each sample's full-sequence teacher_log_probs down to
-                # just the response-aligned span (the last response_length
-                # positions before total_length), matching student_log_probs.
-                # NOTE: this assumes response tokens are the trailing segment
-                # of "tokens" (prompt first, then generated response) -- the
-                # standard rollout convention, not re-verified here.
+                # Take only the response portion of each sequence.
                 response_teacher_log_probs = [
                     full_teacher_log_probs[i, total_len - resp_len : total_len]
                     for i, (total_len, resp_len) in enumerate(
@@ -174,17 +169,9 @@ async def train(args):
                     )
                 ]
 
-                # NOTE: unlike the previous full-sequence version, position 0
-                # of each response_teacher_log_probs entry is NOT guaranteed
-                # to be nan anymore -- it's the first response token, scored
-                # with the real prompt as context, so it should be a valid
-                # logprob. train_student()'s "mask position 0" logic was
-                # written for the old (prompt-included, nan-at-position-0)
-                # convention and likely needs to be revisited/removed; not
-                # changed here since that's a separate decision.
                 rd = merge_teacher_signal(rd, {"teacher_log_probs": response_teacher_log_probs})
                 opd_data_refs.append(Box(ray.put(rd)))
-            opd_data_ref = opd_data_refs
+            # opd_data_ref = opd_data_refs
 
         # # Merge teacher signal into rollout data
         # with _timed_block(prefix, "merge teacher signal", timing_raw=timing_raw):
@@ -198,7 +185,7 @@ async def train(args):
         # routes to train_student(), which masks out the nan at position 0
         # of each teacher_log_probs entry before it reaches the loss.
         async with _timed_phase(prefix, "actor train", timing_raw=timing_raw):
-            await actor_model.train(rollout_id, opd_data_ref)
+            await actor_model.train(rollout_id, opd_data_refs)
 
         if should_run_periodic_action(rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout):
             async with _timed_phase(prefix, "save", timing_raw=timing_raw):

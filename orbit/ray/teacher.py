@@ -119,17 +119,13 @@ class TeacherManager:
         Score a batch of student rollout sequences with the teacher model.
 
         Args:
-            token_ids:      LongTensor [B, T] -- may include right-padding
+            token_ids:      LongTensor [B, T] -- 0 for right-padding
             attention_mask: LongTensor [B, T] -- 1 for real tokens, 0 for padding
 
         Returns:
             dict: {"teacher_log_probs": Tensor [B, T]}. Position 0 of every
             sequence is nan (no preceding context). Padded positions (where
-            attention_mask == 0) are ALSO set to nan, since SGLang is only
-            sent each sample's real (unpadded) tokens -- it has no concept of
-            attention_mask itself. Callers (train_student) must mask using
-            attention_mask before these values reach the loss, the same way
-            position-0 nan is already handled.
+            attention_mask == 0) are ALSO set to nan.
         """
         with torch.no_grad():
             seq_lens = attention_mask.sum(dim=1).tolist()
@@ -155,14 +151,11 @@ class TeacherManager:
             try:
                 response = requests.post(url, json=payload, timeout=30.0)
                 response.raise_for_status()
-                result = response.json()
+                result = response.json() # result is list of dicts.
             except requests.exceptions.RequestException as e:
                 logger.error(f"Teacher score HTTP request failed: {e}")
                 raise
-
-            if not isinstance(result, list):
-                result = [result]
-
+            
             max_len = token_ids.shape[1]
             teacher_log_probs_list = []
             for i, r in enumerate(result):
@@ -177,8 +170,7 @@ class TeacherManager:
                 ]
                 log_probs_tensor = torch.tensor(log_probs, dtype=torch.float32)
 
-                # Pad back up to max_len with nan, matching the original
-                # (unpadded) length we sent for this sample, seq_lens[i].
+                # Pad back up to max_len with nan.
                 if log_probs_tensor.shape[0] < max_len:
                     pad = torch.full(
                         (max_len - log_probs_tensor.shape[0],),
@@ -192,29 +184,13 @@ class TeacherManager:
             teacher_log_probs_tensor = torch.stack(teacher_log_probs_list)
             return {"teacher_log_probs": teacher_log_probs_tensor}
  
-    def _extract_logprobs_from_logprobs_field(self, logprobs_list):
-        """
-        Fallback parser for older SGLang response format:
-            [[{"token_id": 101, "logprob": -0.1}, ...], ...]
-        """
-        result = []
-        for token_logprobs in logprobs_list:
-            batch_logprobs = []
-            for token_info in token_logprobs:
-                if isinstance(token_info, dict):
-                    batch_logprobs.append(token_info.get("logprob", 0.0))
-                else:
-                    batch_logprobs.append(float(token_info))
-            result.append(batch_logprobs)
-        return result
- 
-    def offload(self):
+    def offload(self, tags: list[str] | None = None):
         """Offload teacher weights to CPU to free GPU memory during student training."""
-        ray.get([engine.release_memory_occupation.remote() for engine in self._engines])
- 
-    def onload(self):
+        ray.get([engine.release_memory_occupation.remote(tags=tags) for engine in self._engines])
+
+    def onload(self, tags: list[str] | None = None):
         """Reload teacher weights to GPU before scoring."""
-        ray.get([engine.resume_memory_occupation.remote() for engine in self._engines])
+        ray.get([engine.resume_memory_occupation.remote(tags=tags) for engine in self._engines])
  
  
 def create_teacher_manager(args, pg) -> "ray.actor.ActorHandle":
@@ -252,9 +228,6 @@ def create_teacher_manager(args, pg) -> "ray.actor.ActorHandle":
 def merge_teacher_signal(rollout_data: dict, teacher_output: dict) -> dict:
     """
     Merge teacher scoring output into rollout_data in-place.
- 
-    rollout_data must already be materialized (not a Ray object ref).
-    The merged dict is passed to actor_model.train() via ray.put().
     """
     rollout_data.update(teacher_output)
     return rollout_data
