@@ -513,32 +513,11 @@ class MegatronTrainRayActor(TrainRayActor):
 
         with inverse_timer("train_wait"), timer("train"):
 
-            # OPD's KL term is against the teacher, not a reference model, so
-            # ref log-probs are only needed when an additional RL-style KL
-            # term is explicitly requested via --opd-rl-coef.
-            if getattr(self.args, "opd_rl_coef", 0.0) > 0:
-                ref_data = self.compute_ref_log_probs(data_iterator, num_microbatches)
-                if ref_data is not None:
-                    rollout_data.update(ref_data)
-
-            # compute_ref_log_probs() may leave the active model switched to
-            # "ref" (full-FT KL path) or running under disable_adapter()
-            # (PEFT path) -- switch back to "actor" before computing student
-            # log-probs and training, regardless of which path was taken.
-            self._switch_model("actor")
-
-            # Recompute student log-probs so the loss function has access to
-            # the current policy distribution (needed for reverse-KL computation).
             rollout_data.update(
                 self.compute_log_prob(data_iterator, num_microbatches, store_prefix="")
             )
 
             log_rollout_data(rollout_id, self.args, rollout_data)
-
-            # Set loss_type so Megatron's loss function picks the OPD path.
-            # The loss function in model.py reads args.loss_type to decide
-            # whether to compute GRPO advantage loss or OPD KL loss.
-            # self.args.loss_type = f"opd_{self.args.opd_loss_type}"
 
             self._set_replay_stage("replay_backward")
             with timer("actor_train"):

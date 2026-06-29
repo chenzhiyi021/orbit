@@ -1742,12 +1742,6 @@ def get_orbit_extra_args_provider(add_custom_arguments=None):
                 help="Tensor parallel size for the teacher SGLang engine.",
             )
             parser.add_argument(
-                "--opd-rl-coef",
-                type=float,
-                default=0.0,
-                help="Coefficient for the RL loss in the combined OPD loss.",
-            )
-            parser.add_argument(
                 "--opd_teacher_mem_fraction_static",
                 type=float,
                 default=0.25,

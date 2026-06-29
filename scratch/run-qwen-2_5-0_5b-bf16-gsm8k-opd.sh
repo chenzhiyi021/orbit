@@ -89,7 +89,6 @@ OPD_ARGS=(
     --opd-teacher-model-path "${OPD_TEACHER_CKPT}"
     --opd-teacher-num-gpus 1
     --opd-teacher-tp-size 1
-    --opd-rl-coef 0.0
     --loss-type custom_loss
     --custom-loss-function-path "orbit.backends.training_utils.opd_loss.opd_loss_function"
     --opd_teacher_mem_fraction_static 0.25
