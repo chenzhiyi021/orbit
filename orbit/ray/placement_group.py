@@ -1,3 +1,4 @@
+import json
 import logging
 import socket
 
@@ -121,48 +122,63 @@ def create_placement_groups(args):
         "rollout": (pg, rollout_pg_reordered_bundle_indices, rollout_pg_reordered_gpu_ids),
     }
 
-def create_opd_placement_groups(args):
-    """Create placement groups for student (actor), teacher, and rollout engines.
+def _parse_mopd_teacher_configs(args) -> list[dict]:
+    """Return ordered list of teacher config dicts: [general, ...specialised].
 
-    colocate=True: all three roles (actor, teacher, rollout) share the SAME
-    placement group bundles. This is the only colocate mode supported currently.
-    
-    TODO: partial-colocate option
+    The general teacher is always first and derived from --opd-teacher-* args.
+    Specialised teachers come from --mopd-teacher-configs (JSON list).  Each
+    dict is guaranteed to have ``"name"`` and ``"num_gpus"`` keys.
+    """
+    mopd_configs = getattr(args, "mopd_teacher_configs", None)
+    specialised: list[dict] = json.loads(mopd_configs) if mopd_configs else []
+    general = {
+        "name": "general",
+        "num_gpus": args.opd_teacher_num_gpus,
+        "tp_size": getattr(args, "opd_teacher_tp_size", 1),
+    }
+    # Fill in missing num_gpus for specialised teachers (fall back to general's value).
+    for cfg in specialised:
+        cfg.setdefault("num_gpus", args.opd_teacher_num_gpus)
+    return [general] + specialised
+
+
+def create_opd_placement_groups(args):
+    """Create placement groups for student (actor), teachers, and rollout engines.
+
+    Supports both single-teacher (original OPD) and multi-teacher (MOPD) modes.
+    The distinction is transparent to callers: the returned dict always has a
+    ``"teachers"`` key containing a ``{name: pg_tuple}`` dict.
+
+    colocate=True  — all roles share the same placement-group bundles.
 
     GPU layout (non-colocate, non-debug):
-        [0 .. actor_gpus) -> actor
-        [actor_gpus .. actor_gpus + teacher_gpus) -> teacher
-        [actor_gpus + teacher_gpus .. total) -> rollout
+        [0 .. actor_gpus)                               → actor
+        [actor_gpus .. actor_gpus + teacher_0_gpus)     → general teacher
+        [...  .. actor_gpus + Σ teacher_i_gpus)         → specialised teachers (in order)
+        [actor_gpus + Σ teacher_gpus .. total)          → rollout
     """
     if args.use_critic:
         raise NotImplementedError("Critic is not supported for OPD training.")
 
     actor_gpus = args.actor_num_nodes * args.actor_num_gpus_per_node
+    teacher_configs = _parse_mopd_teacher_configs(args)
+    total_teacher_gpus = sum(cfg["num_gpus"] for cfg in teacher_configs)
 
     if args.debug_train_only:
         num_gpus = actor_gpus
-        teacher_offset = None
-        rollout_offset = None
     elif args.debug_rollout_only:
         num_gpus = args.rollout_num_gpus
-        teacher_offset = None
-        rollout_offset = 0
     elif args.colocate:
         num_gpus = actor_gpus
-        teacher_offset = 0
-        rollout_offset = 0
     else:
-        teacher_gpus = args.opd_teacher_num_gpus
-        num_gpus = actor_gpus + teacher_gpus + args.rollout_num_gpus
-        teacher_offset = actor_gpus
-        rollout_offset = actor_gpus + teacher_gpus
+        num_gpus = actor_gpus + total_teacher_gpus + args.rollout_num_gpus
 
     logger.info(
         f"Creating OPD placement group with {num_gpus} GPUs "
         f"(colocate={getattr(args, 'colocate', False)}, "
-        f"actor={actor_gpus if not args.debug_rollout_only else 0}, "
-        f"teacher={args.opd_teacher_num_gpus if not (args.debug_train_only or args.debug_rollout_only or args.colocate) else (actor_gpus if args.colocate else 0)}, "
-        f"rollout={args.rollout_num_gpus if not args.debug_train_only and not args.colocate else (actor_gpus if args.colocate else 0)})..."
+        f"actor={actor_gpus}, "
+        f"teachers={[(c['name'], c['num_gpus']) for c in teacher_configs]}, "
+        f"rollout={args.rollout_num_gpus})..."
     )
 
     pg, bundle_indices, gpu_ids = _create_placement_group(num_gpus)
@@ -170,27 +186,41 @@ def create_opd_placement_groups(args):
     if args.debug_train_only:
         return {
             "actor": (pg, bundle_indices, gpu_ids),
-            "teacher": None,
+            "teachers": None,
             "rollout": None,
         }
 
     if args.debug_rollout_only:
         return {
             "actor": None,
-            "teacher": None,
+            "teachers": None,
             "rollout": (pg, bundle_indices, gpu_ids),
         }
 
     if args.colocate:
+        colocate_pg = (pg, bundle_indices, gpu_ids)
         return {
-            "actor": (pg, bundle_indices, gpu_ids),
-            "teacher": (pg, bundle_indices, gpu_ids),
-            "rollout": (pg, bundle_indices, gpu_ids),
+            "actor": colocate_pg,
+            "teachers": {cfg["name"]: colocate_pg for cfg in teacher_configs},
+            "rollout": colocate_pg,
         }
 
+    # Non-colocate: slice bundle_indices / gpu_ids per teacher.
+    teacher_pgs: dict[str, tuple] = {}
+    offset = actor_gpus
+    for cfg in teacher_configs:
+        n = cfg["num_gpus"]
+        teacher_pgs[cfg["name"]] = (
+            pg,
+            bundle_indices[offset : offset + n],
+            gpu_ids[offset : offset + n],
+        )
+        offset += n
+    rollout_offset = offset
+
     return {
-        "actor": (pg, bundle_indices[:teacher_offset], gpu_ids[:teacher_offset]),
-        "teacher": (pg, bundle_indices[teacher_offset:rollout_offset], gpu_ids[teacher_offset:rollout_offset]),
+        "actor": (pg, bundle_indices[:actor_gpus], gpu_ids[:actor_gpus]),
+        "teachers": teacher_pgs,
         "rollout": (pg, bundle_indices[rollout_offset:], gpu_ids[rollout_offset:]),
     }
     
