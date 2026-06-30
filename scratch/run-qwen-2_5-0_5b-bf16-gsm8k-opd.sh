@@ -155,12 +155,21 @@ DEBUG_ARGS=(
     --log-passrate
 )
 
+# PEFT_ARGS=(
+#     --peft-method lora
+#     --peft-variant standard
+#     --lora-rank 32
+#     --lora-alpha 64
+#     --lora-dropout 0.0
+#     --target-modules all-linear
+# )
+
 PEFT_ARGS=(
-    --peft-method lora
+    --peft-method oft
     --peft-variant standard
-    --lora-rank 32
-    --lora-alpha 64
-    --lora-dropout 0.0
+    --oft-type canonical_oft
+    --oft-block-size 128
+    --oft-eps 6e-5
     --target-modules all-linear
 )
 
