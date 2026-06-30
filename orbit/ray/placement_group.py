@@ -42,9 +42,10 @@ def sort_key(x):
     return (node_ip_parts, gpu_id)
 
 
-def _create_placement_group(num_gpus):
-    """Create a placement group with the specified number of GPUs."""
-    bundles = [{"GPU": 1, "CPU": 1} for _ in range(num_gpus)]
+def _create_placement_group(num_gpus, cpus_per_bundle: int = 8):
+    """Create a placement group with the specified number of GPUs.
+    """
+    bundles = [{"GPU": 1, "CPU": cpus_per_bundle} for _ in range(num_gpus)]
     pg = placement_group(bundles, strategy="PACK")
     num_bundles = len(bundles)
 

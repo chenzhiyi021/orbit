@@ -1747,7 +1747,15 @@ def get_orbit_extra_args_provider(add_custom_arguments=None):
                 default=0.25,
                 help="Static memory fraction for the teacher model.",
             )
-            return parser    
+            parser.add_argument(
+                "--mopd-teacher-configs",
+                type=str, 
+                default=None,
+                help='JSON list: [{"name":"math","path":"/ckpt","num_gpus":1,"tp_size":1,"domains":["math"]}]'
+            )
+            return parser
+
+            return parser   
 
         def add_rollout_buffer_arguments(parser):
             parser.add_argument(

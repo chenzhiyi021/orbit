@@ -18,9 +18,8 @@ from orbit.ray.placement_group import (
     create_training_models,
 )
 from orbit.ray.teacher import (
-    TeacherManager,
     merge_teacher_signal,
-    create_teacher_manager,
+    create_mopd_teachers,
 )
 
 from orbit.utils import tracking_utils
@@ -56,9 +55,9 @@ async def train(args):
     async with _timed_phase("startup", "create training models", timing_raw=startup_timing):
         actor_model, _ = await create_training_models(args, pgs, rollout_manager)
 
-    # Teacher inference server
+    # Teacher inference server(s) — single teacher or MopdRouter for MOPD
     with _timed_block("startup", "create teacher manager", timing_raw=startup_timing):
-        teacher_server = create_teacher_manager(args, pgs["teacher"])
+        teacher_server = create_mopd_teachers(args, pgs["teachers"])
 
     if args.offload_rollout:
         async with _timed_phase("startup", "onload rollout weights", timing_raw=startup_timing):
@@ -158,7 +157,12 @@ async def train(args):
                     [[1] * len(t) + [0] * (max_len - len(t)) for t in raw_tokens]
                 )
 
-                teacher_output = ray.get(teacher_server.score.remote(token_ids, attention_mask))
+                # Per-sample domain for MOPD routing.  Falls back to the global
+                # rm_type arg when the rollout data has no per-sample "domains" field
+                # (single-domain runs such as the current GSM8K math script).
+                B = len(raw_tokens)
+                domains = rd.get("domains") or [getattr(args, "rm_type", "general")] * B
+                teacher_output = ray.get(teacher_server.score.remote(token_ids, attention_mask, domains))
                 full_teacher_log_probs = teacher_output["teacher_log_probs"]  # [B, max_len]
 
                 # Take only the response portion of each sequence.
