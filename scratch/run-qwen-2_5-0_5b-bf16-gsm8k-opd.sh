@@ -48,7 +48,7 @@ TRAIN_ROWS=${TRAIN_ROWS:-$(wc -l < "${TRAIN_JSONL}")}
 NUM_ROLLOUT=${NUM_ROLLOUT:-$(( (TRAIN_ROWS * TOTAL_EPOCHS + ROLLOUT_BATCH_SIZE - 1) / ROLLOUT_BATCH_SIZE ))}
 
 # === ARGS arrays ===
-COLOCATE_ARGS=( --colocate )
+COLOCATE_ARGS=( --debug-colocate )
 
 CKPT_ARGS=(
     --hf-checkpoint "${HF_CKPT}"
@@ -155,22 +155,22 @@ DEBUG_ARGS=(
     --log-passrate
 )
 
-# PEFT_ARGS=(
-#     --peft-method lora
-#     --peft-variant standard
-#     --lora-rank 32
-#     --lora-alpha 64
-#     --lora-dropout 0.0
-#     --target-modules all-linear
-# )
-
 PEFT_ARGS=(
-    --peft-method oft
+    --peft-method lora
     --peft-variant standard
-    --oft-type canonical_oft
-    --oft-block-size 128
-    --oft-eps 6e-5
+    --lora-rank 32
+    --lora-alpha 64
+    --lora-dropout 0.0
     --target-modules all-linear
 )
+
+# PEFT_ARGS=(
+#     --peft-method oft
+#     --peft-variant standard
+#     --oft-type canonical_oft
+#     --oft-block-size 128
+#     --oft-eps 6e-5
+#     --target-modules all-linear
+# )
 
 source "${ORBIT_ROOT}/scripts/lib/launcher.sh"

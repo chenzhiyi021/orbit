@@ -146,11 +146,10 @@ def _parse_mopd_teacher_configs(args) -> list[dict]:
 def create_opd_placement_groups(args):
     """Create placement groups for student (actor), teachers, and rollout engines.
 
-    Supports both single-teacher (original OPD) and multi-teacher (MOPD) modes.
-    The distinction is transparent to callers: the returned dict always has a
-    ``"teachers"`` key containing a ``{name: pg_tuple}`` dict.
+    Supports both single-teacher and multi-teacher (MOPD) modes.
 
-    colocate=True  — all roles share the same placement-group bundles.
+    --debug_colocate=True  — all roles share the same placement-group bundle.
+    --colocate=True        — actor + rollout share a bundle, teachers get a dedicated bundle.
 
     GPU layout (non-colocate, non-debug):
         [0 .. actor_gpus)                               → actor
@@ -210,9 +209,9 @@ def create_opd_placement_groups(args):
         }
 
     if args.colocate:
-        # Production 2-GPU: actor + rollout share GPU 0, teachers get a dedicated GPU.
+        # Actor + rollout share a bundle, teachers get a dedicated bundle.
         ar_tuple = (pg, bundle_indices, gpu_ids)
-        logger.info("colocate: creating separate 1-GPU placement group for teachers.")
+        logger.info("colocate: creating a separate placement group for teachers.")
         t_pg, t_bundles, t_gpu_ids = _create_placement_group(1)
         t_tuple = (t_pg, t_bundles, t_gpu_ids)
         return {
