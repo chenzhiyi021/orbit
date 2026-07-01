@@ -165,21 +165,23 @@ def create_opd_placement_groups(args):
     teacher_configs = _parse_mopd_teacher_configs(args)
     total_teacher_gpus = sum(cfg["num_gpus"] for cfg in teacher_configs)
 
+    debug_colocate = getattr(args, "debug_colocate", False)
+
     if args.debug_train_only:
         num_gpus = actor_gpus
     elif args.debug_rollout_only:
         num_gpus = args.rollout_num_gpus
-    elif args.colocate:
+    elif args.colocate or debug_colocate:
         num_gpus = actor_gpus
     else:
         num_gpus = actor_gpus + total_teacher_gpus + args.rollout_num_gpus
 
+    mode = "debug-colocate" if debug_colocate else ("colocate" if args.colocate else "non-colocate")
     logger.info(
-        f"Creating OPD placement group with {num_gpus} GPUs "
-        f"(colocate={getattr(args, 'colocate', False)}, "
-        f"actor={actor_gpus}, "
+        f"Creating OPD placement group: mode={mode}, gpus={num_gpus} "
+        f"(actor={actor_gpus}, "
         f"teachers={[(c['name'], c['num_gpus']) for c in teacher_configs]}, "
-        f"rollout={args.rollout_num_gpus})..."
+        f"rollout={args.rollout_num_gpus})"
     )
 
     pg, bundle_indices, gpu_ids = _create_placement_group(num_gpus)
@@ -198,12 +200,25 @@ def create_opd_placement_groups(args):
             "rollout": (pg, bundle_indices, gpu_ids),
         }
 
-    if args.colocate:
-        colocate_pg = (pg, bundle_indices, gpu_ids)
+    if debug_colocate:
+        # Single-GPU debug: actor + rollout + teachers all on the same bundle.
+        all_tuple = (pg, bundle_indices, gpu_ids)
         return {
-            "actor": colocate_pg,
-            "teachers": {cfg["name"]: colocate_pg for cfg in teacher_configs},
-            "rollout": colocate_pg,
+            "actor": all_tuple,
+            "teachers": {cfg["name"]: all_tuple for cfg in teacher_configs},
+            "rollout": all_tuple,
+        }
+
+    if args.colocate:
+        # Production 2-GPU: actor + rollout share GPU 0, teachers get a dedicated GPU.
+        ar_tuple = (pg, bundle_indices, gpu_ids)
+        logger.info("colocate: creating separate 1-GPU placement group for teachers.")
+        t_pg, t_bundles, t_gpu_ids = _create_placement_group(1)
+        t_tuple = (t_pg, t_bundles, t_gpu_ids)
+        return {
+            "actor": ar_tuple,
+            "teachers": {cfg["name"]: t_tuple for cfg in teacher_configs},
+            "rollout": ar_tuple,
         }
 
     # Non-colocate: slice bundle_indices / gpu_ids per teacher.

@@ -20,6 +20,7 @@ def make_args(**overrides):
     defaults = dict(
         use_critic=False,
         colocate=False,
+        debug_colocate=False,
         debug_train_only=False,
         debug_rollout_only=False,
         actor_num_nodes=1,
@@ -111,11 +112,11 @@ class TestMopdPlacementGroups:
         )
         assert sorted(all_indices) == list(range(6))
 
-    def test_colocate_all_teachers_share_same_pg(self):
+    def test_debug_colocate_all_roles_share_same_pg(self):
         cfg = json.dumps([{"name": "math", "path": "/ckpt", "domains": ["math"]}])
         from orbit.ray.placement_group import create_opd_placement_groups
         pgs = create_opd_placement_groups(
-            make_args(colocate=True, actor_num_gpus_per_node=1, mopd_teacher_configs=cfg)
+            make_args(debug_colocate=True, actor_num_gpus_per_node=1, mopd_teacher_configs=cfg)
         )
         assert pgs["teachers"]["general"][1] == [0]
         assert pgs["teachers"]["math"][1] == [0]
