@@ -1745,13 +1745,24 @@ def get_orbit_extra_args_provider(add_custom_arguments=None):
                 "--opd_teacher_mem_fraction_static",
                 type=float,
                 default=0.25,
-                help="Static memory fraction for the teacher model.",
+                help=(
+                    "Default static KV-cache memory fraction for the general teacher "
+                    "(and any specialised teacher that does not set mem_fraction_static "
+                    "in --mopd-teacher-configs)."
+                ),
             )
             parser.add_argument(
                 "--mopd-teacher-configs",
-                type=str, 
+                type=str,
                 default=None,
-                help='JSON list: [{"name":"math","path":"/ckpt","num_gpus":1,"tp_size":1,"domains":["math"]}]'
+                help=(
+                    'JSON list of specialised teacher configs.  Teachers are initialised '
+                    'in list order, after the general teacher.  Each entry may include: '
+                    '"name" (str, required), "path" (str, required), "num_gpus" (int), '
+                    '"tp_size" (int), "domains" (list[str]), '
+                    '"mem_fraction_static" (float — per-teacher KV-cache fraction; '
+                    'overrides --opd-teacher-mem-fraction-static for this teacher).'
+                ),
             )
             parser.add_argument(
                 "--debug-colocate",

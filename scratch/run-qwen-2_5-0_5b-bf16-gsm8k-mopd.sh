@@ -35,15 +35,17 @@ OPD_GENERAL_TEACHER_CKPT="/mnt/L202500431/models/qwen2.5-1.5b-instruct"
 
 # Specialised math teacher -- routes all "math" domain samples.
 # Encoded as JSON so it can be passed as a single --mopd-teacher-configs arg.
-MOPD_MATH_TEACHER_CKPT="/mnt/L202500431/models/qwen2.5-3b-instruct"
+# DEBUG: use 1.5B (same as general) so both teachers fit on GPU 1.
+MOPD_MATH_TEACHER_CKPT="/mnt/L202500431/models/qwen2.5-1.5b-instruct"
 MOPD_TEACHER_CONFIGS=$(python3 -c "
 import json
 print(json.dumps([
     {
-        'name':    'math',
-        'path':    '${MOPD_MATH_TEACHER_CKPT}',
-        'domains': ['math'],
-        'num_gpus': 1,
+        'name':              'math',
+        'path':              '${MOPD_MATH_TEACHER_CKPT}',
+        'domains':           ['math'],
+        'num_gpus':          1,
+        'mem_fraction_static': 0.5,        # starts after general; sees less free GPU, use higher fraction
     }
 ]))
 ")
@@ -96,7 +98,7 @@ echo "════════════════════════�
 echo ""
 
 # === Resources ===
-GPUS_PER_NODE=1
+GPUS_PER_NODE=2
 RAY_NUM_CPUS=128
 
 # === Model args ===
@@ -111,7 +113,13 @@ TRAIN_ROWS=${TRAIN_ROWS:-$(wc -l < "${TRAIN_JSONL}")}
 NUM_ROLLOUT=${NUM_ROLLOUT:-$(( (TRAIN_ROWS * TOTAL_EPOCHS + ROLLOUT_BATCH_SIZE - 1) / ROLLOUT_BATCH_SIZE ))}
 
 # === ARGS arrays ===
-COLOCATE_ARGS=( --colocate )
+# 2-GPU colocate: actor+rollout on GPU 0, teachers on GPU 1.
+# driver.sh passes --actor-num-gpus-per-node ${GPUS_PER_NODE} (=2 here), so
+# we override to 1 inside COLOCATE_ARGS to avoid consuming both GPUs for actor.
+COLOCATE_ARGS=(
+    --colocate
+    --actor-num-gpus-per-node 1
+)
 
 CKPT_ARGS=(
     --hf-checkpoint "${HF_CKPT}"
@@ -153,7 +161,7 @@ OPD_ARGS=(
     --opd-teacher-model-path "${OPD_GENERAL_TEACHER_CKPT}"
     --opd-teacher-num-gpus 1
     --opd-teacher-tp-size 1
-    --opd_teacher_mem_fraction_static 0.9
+    --opd_teacher_mem_fraction_static 0.3   # DEBUG: 2x1.5B teachers share GPU 1
     --mopd-teacher-configs "${MOPD_TEACHER_CONFIGS}"
     --loss-type custom_loss
     --custom-loss-function-path "orbit.backends.training_utils.opd_loss.opd_loss_function"

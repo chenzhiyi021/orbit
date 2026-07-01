@@ -116,6 +116,10 @@ class TeacherManager:
             # f"loss_type={self.loss_type}, addr={self._server_host}:{self._server_port}"
         )
 
+    def ping(self) -> bool:
+        """No-op used to block until __init__ (SGLang server startup) completes."""
+        return True
+
     def score(self, token_ids: torch.Tensor, attention_mask: torch.Tensor) -> dict:
         """
         Score a batch of student rollout sequences with the teacher model.
@@ -401,44 +405,81 @@ def create_mopd_teachers(args, teacher_pgs: dict) -> "ray.actor.ActorHandle":
     configs_raw = getattr(args, "mopd_teacher_configs", None)
     teacher_configs: list[dict] = json.loads(configs_raw) if configs_raw else []
 
-    # ── 2. Always register the general (fallback) teacher ─────────────────
     general_pg = teacher_pgs.get("general")
     if general_pg is None:
         raise ValueError(
             f"teacher_pgs must contain a 'general' key. Got: {list(teacher_pgs.keys())}"
         )
-    mem_frac = getattr(args, "opd_teacher_mem_fraction_static", 0.25)
-    # Each teacher gets its own base_port offset by 1000 to avoid SGLang port
-    # conflicts when multiple teachers run on the same node.
-    _next_port = 25000
-    teachers: dict[str, ray.actor.ActorHandle] = {
-        "general": _create_single_teacher_manager(
-            args, general_pg, args.opd_teacher_model_path, mem_frac, base_port=_next_port
-        ),
-    }
-    _next_port += 1000
+
+    # Whether teachers share a GPU — determines sequential vs concurrent init.
+    colocate = getattr(args, "colocate", False) or getattr(args, "debug_colocate", False)
+
+    # Global fallback mem_fraction (used when a teacher has no per-teacher value).
+    global_mem_frac = getattr(args, "opd_teacher_mem_fraction_static", 0.25)
+
+    # ── 2. Build ordered list of teacher entries ──────────────────────────
+    # Init order: general first, then specialised teachers in JSON list order.
+    # Ports follow the same order so port 25000 always goes to general.
+    entries = [
+        {
+            "name": "general",
+            "path": args.opd_teacher_model_path,
+            "pg": general_pg,
+            "mem_fraction": global_mem_frac,
+            "domains": [],
+            "base_port": 25000,
+        }
+    ] + [
+        {
+            "name": cfg["name"],
+            "path": cfg["path"],
+            "pg": teacher_pgs.get(cfg["name"]),
+            "mem_fraction": cfg.get("mem_fraction_static", global_mem_frac),
+            "domains": cfg.get("domains", []),
+            "base_port": 25000 + (idx + 1) * 1000,
+        }
+        for idx, cfg in enumerate(teacher_configs)
+    ]
+
+    logger.info(
+        "MOPD teacher init order (%s): %s",
+        "sequential" if colocate else "concurrent",
+        [(e["name"], e["mem_fraction"]) for e in entries],
+    )
+
+    # ── 3. Create (and optionally await) each teacher in order ────────────
+    teachers: dict[str, ray.actor.ActorHandle] = {}
     domain_to_teacher: dict[str, str] = {}
 
-    # ── 3. Register specialised teachers ──────────────────────────────────
-    for cfg in teacher_configs:
-        name = cfg["name"]
-        path = cfg["path"]
-        domains = cfg.get("domains", [])
-        pg = teacher_pgs.get(name)
+    for entry in entries:
+        name = entry["name"]
+        pg = entry["pg"]
         if pg is None:
             raise ValueError(
-                f"No placement group for teacher '{name}'. Available pgs: {list(teacher_pgs.keys())}"
+                f"No placement group for teacher '{name}'. "
+                f"Available pgs: {list(teacher_pgs.keys())}"
             )
-        teachers[name] = _create_single_teacher_manager(args, pg, path, mem_frac, base_port=_next_port)
-        _next_port += 1000
-        for domain in domains:
+        handle = _create_single_teacher_manager(
+            args, pg, entry["path"], entry["mem_fraction"], base_port=entry["base_port"]
+        )
+        if colocate:
+            # Block until this teacher's SGLang server is fully up (weights +
+            # KV cache + CUDA graph) before the next teacher measures free GPU
+            # memory.  Without this, concurrent KV allocations race and the
+            # second teacher sees inflated free-memory estimates that collapse
+            # once the first teacher's CUDA graph capture commits its memory.
+            ray.get(handle.ping.remote())
+            logger.info("MOPD teacher '%s' ready (colocate sequential init).", name)
+        teachers[name] = handle
+
+        for domain in entry["domains"]:
             if domain in domain_to_teacher:
                 logger.warning(
-                    f"Domain '{domain}' already mapped to '{domain_to_teacher[domain]}'; "
-                    f"overriding with '{name}'."
+                    "Domain '%s' already mapped to '%s'; overriding with '%s'.",
+                    domain, domain_to_teacher[domain], name,
                 )
             domain_to_teacher[domain] = name
-        logger.info(f"MOPD teacher '{name}': model={path}, domains={domains}")
+        logger.info("MOPD teacher '%s': model=%s, domains=%s", name, entry["path"], entry["domains"])
 
     logger.info(f"MOPD domain routing table: {domain_to_teacher} (fallback → 'general')")
 
