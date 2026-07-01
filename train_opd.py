@@ -40,6 +40,11 @@ async def train(args):
     configure_logger()
     startup_timing: dict[str, float] = {}
 
+    # TODO: should be moved to arguments.py
+    # --debug-colocate implies colocate semantics for weight-update colocate detection.
+    if getattr(args, "debug_colocate", False):
+        args.colocate = True
+
     # GPU allocation
     with _timed_block("startup", "placement groups", timing_raw=startup_timing):
         pgs = create_opd_placement_groups(args)
