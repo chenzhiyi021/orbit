@@ -163,8 +163,8 @@ OPD_ARGS=(
     --opd-teacher-tp-size 1
     --opd_teacher_mem_fraction_static 0.3   # DEBUG: 2x1.5B teachers share GPU 1
     --mopd-teacher-configs "${MOPD_TEACHER_CONFIGS}"
-    --loss-type custom_loss
-    --custom-loss-function-path "orbit.backends.training_utils.opd_loss.opd_loss_function"
+    --advantage-estimator on_policy_distillation
+    --loss-type policy_loss
 )
 
 LOSS_ARGS=(
@@ -229,11 +229,11 @@ DEBUG_ARGS=(
 )
 
 PEFT_ARGS=(
-    --peft-method oft
+    --peft-method lora
     --peft-variant standard
-    --oft-type canonical_oft
-    --oft-block-size 128
-    --oft-eps 6e-5
+    --lora-rank 32
+    --lora-alpha 64
+    --lora-dropout 0.0
     --target-modules all-linear
 )
 

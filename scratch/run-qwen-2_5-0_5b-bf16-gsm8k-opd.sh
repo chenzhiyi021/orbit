@@ -89,8 +89,8 @@ OPD_ARGS=(
     --opd-teacher-model-path "${OPD_TEACHER_CKPT}"
     --opd-teacher-num-gpus 1
     --opd-teacher-tp-size 1
-    --loss-type custom_loss
-    --custom-loss-function-path "orbit.backends.training_utils.opd_loss.opd_loss_function"
+    --advantage-estimator on_policy_distillation
+    --loss-type policy_loss
     --opd_teacher_mem_fraction_static 0.25
 )
 

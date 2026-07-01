@@ -512,6 +512,17 @@ class MegatronTrainRayActor(TrainRayActor):
         data_iterator, num_microbatches = get_data_iterator(self.args, self.model, rollout_data)
 
         with inverse_timer("train_wait"), timer("train"):
+            if self.args.compute_advantages_and_returns:
+                if self._active_model_tag != "actor":
+                    self._switch_model("actor")
+                rollout_data.update(
+                    self.compute_log_prob(
+                        data_iterator,
+                        num_microbatches,
+                        store_prefix="",
+                    )
+                )
+                compute_advantages_and_returns(self.args, rollout_data)
 
             log_rollout_data(rollout_id, self.args, rollout_data)
 
