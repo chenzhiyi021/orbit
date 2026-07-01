@@ -1753,9 +1753,17 @@ def get_orbit_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help='JSON list: [{"name":"math","path":"/ckpt","num_gpus":1,"tp_size":1,"domains":["math"]}]'
             )
+            parser.add_argument(
+                "--debug-colocate",
+                action="store_true",
+                default=False,
+                help=(
+                    "Pack actor, rollout, and all teachers onto a single GPU bundle. "
+                    "Requires --colocate. Single-GPU debug mode only; "
+                    "in production omit this so teachers get a dedicated GPU."
+                ),
+            )
             return parser
-
-            return parser   
 
         def add_rollout_buffer_arguments(parser):
             parser.add_argument(
