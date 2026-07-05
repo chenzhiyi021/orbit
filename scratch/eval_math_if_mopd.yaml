@@ -1,0 +1,30 @@
+# Eval config for the math + instruction-following MOPD validation run.
+#
+# Loaded via --eval-config (see orbit/utils/arguments.py::_resolve_eval_datasets
+# and orbit/utils/eval_config.py::EvalDatasetConfig). Each entry below becomes
+# its own eval dataset with its own rm_type/input_key/label_key, and
+# orbit/ray/rollout.py::_log_eval_rollout_data logs accuracy per dataset name
+# (`eval/math`, `eval/ifbench`) plus a cross-dataset `eval/avg` -- so the two
+# domains show up as separate numbers automatically, no extra logging code
+# needed.
+#
+# Adjust the `path` values below to match the actual paths on the training
+# server.
+eval:
+  datasets:
+    - name: math
+      path: /mnt/L202500431/datasets/gsm8k/main/test-00000-of-00001.parquet
+      rm_type: math
+      input_key: question
+      label_key: answer
+
+    - name: ifbench
+      # Produced by scripts/mopd_prepare_ifbench_eval.py from
+      # IFBench_test/data/train-00000-of-00001.parquet -- has "prompt"/"label"/
+      # "metadata" columns, where metadata carries instruction_id_list/kwargs/
+      # prompt_text/record_id (see orbit/rollout/rm_hub/ifbench.py).
+      path: /mnt/L202500431/datasets/orbit_mopd/domains/if_ifbench_test.jsonl
+      rm_type: ifbench
+      input_key: prompt
+      label_key: label
+      metadata_key: metadata
