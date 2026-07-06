@@ -59,6 +59,17 @@ def _to_jsonable(value: Any) -> Any:
                 return None
         except (TypeError, ValueError):
             pass
+    if isinstance(value, float) and value.is_integer():
+        # Parquet round-trips commonly upcast an int column to float64 once
+        # any row is null (e.g. IFEval-style kwargs share one struct column
+        # across instruction types -- n_start/n_end are int for
+        # RepeatSpanChecker rows, null for every other instruction type in
+        # the same column). A whole-number float slipping through as e.g.
+        # 3.0 breaks strict-int consumers such as IFBench's
+        # RepeatSpanChecker, which slices a string with it directly
+        # (`str[3.0:16.0]` raises TypeError, not caught by any `is None`
+        # check upstream).
+        return int(value)
     return value
 
 
@@ -71,7 +82,7 @@ def iter_records(path: str) -> Iterator[dict]:
                 if not line:
                     continue
                 try:
-                    yield json.loads(line)
+                    yield _to_jsonable(json.loads(line))
                 except json.JSONDecodeError as e:
                     print(f"[mopd_data] JSON decode error at {path}:{line_num}: {e}")
                     continue
