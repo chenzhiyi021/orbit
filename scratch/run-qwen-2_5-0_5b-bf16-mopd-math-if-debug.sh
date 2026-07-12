@@ -159,7 +159,7 @@ ROLLOUT_ARGS=(
     --num-rollout "${NUM_ROLLOUT}"
     --rollout-batch-size "${ROLLOUT_BATCH_SIZE}"
     --n-samples-per-prompt "${N_SAMPLES_PER_PROMPT}"
-    --rollout-max-response-len 1024
+    --rollout-max-response-len 2048
     --rollout-temperature 1.0
     --global-batch-size "${GLOBAL_BATCH_SIZE}"
 )
@@ -219,7 +219,7 @@ EVAL_ARGS=(
     --eval-interval 10
     --eval-config "${EVAL_CONFIG}"
     --n-samples-per-eval-prompt 1
-    --eval-max-response-len 1024
+    --eval-max-response-len 2048
     --eval-top-k 1
     --eval-pass-k-values 1 2 4 8 16
 )

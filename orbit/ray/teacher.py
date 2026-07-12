@@ -21,6 +21,44 @@ from .utils import build_noset_visible_devices_env_vars
 
 logger = logging.getLogger(__name__)
 
+# Sentinel used to pad an under-filled top-k slot (fewer than opd_topk_k candidates
+# returned by SGLang for a given position, or the position has no context to score).
+# exp(_TOPK_PAD_LOGPROB) underflows to exactly 0.0 in float32 (no NaN from 0 * -inf),
+# so downstream weighted sums can treat padded slots as carrying zero probability mass
+# without needing a separate validity mask.
+_TOPK_PAD_LOGPROB = -1e4
+_TOPK_PAD_TOKEN_ID = 0
+
+
+def _parse_teacher_topk_entry(entry, k: int) -> tuple[list[int], list[float]]:
+    """Normalize one position's SGLang top-k payload into fixed-size (k) id/logprob lists.
+
+    SGLang's `input_top_logprobs` entries are normally a list of `[logprob, token_id, text]`
+    tuples (same shape as `input_token_logprobs`, one per candidate), or None for positions
+    with no preceding context (matches `input_token_logprobs[0]`). Truncates to the first k
+    candidates if more are returned, and pads with the sentinel if fewer are returned.
+    """
+    ids: list[int] = []
+    logprobs: list[float] = []
+
+    if entry:
+        for candidate in entry[:k]:
+            if isinstance(candidate, dict):
+                token_id = candidate.get("token_id", candidate.get("token_ids"))
+                logprob = candidate.get("logprob", candidate.get("log_prob"))
+            else:
+                logprob, token_id = candidate[0], candidate[1]
+            if token_id is None or logprob is None:
+                continue
+            ids.append(int(token_id))
+            logprobs.append(float(logprob))
+
+    while len(ids) < k:
+        ids.append(_TOPK_PAD_TOKEN_ID)
+        logprobs.append(_TOPK_PAD_LOGPROB)
+
+    return ids, logprobs
+
 
 def _teacher_args(args):
     """Shallow-copy args with hf_checkpoint swapped to the teacher checkpoint.
@@ -50,8 +88,8 @@ class TeacherManager:
 
         self.args = args
         self.pg = pg
-        # self.loss_type = getattr(args, "opd_loss_type", "sampled_token")
-        # self.topk_k = getattr(args, "opd_topk_k", 32)
+        self.loss_type = getattr(args, "opd_loss_type", "sampled_token")
+        self.topk_k = getattr(args, "opd_topk_k", 32)
 
         pg_obj, bundle_indices, gpu_ids = pg
         tp_size = args.opd_teacher_tp_size
@@ -113,7 +151,7 @@ class TeacherManager:
         logger.info(
             f"TeacherManager ready: model={args.opd_teacher_model_path}, "
             f"tp_size={tp_size}, num_engines={num_engines}, "
-            # f"loss_type={self.loss_type}, addr={self._server_host}:{self._server_port}"
+            f"loss_type={self.loss_type}, topk_k={self.topk_k}"
         )
 
     def ping(self) -> bool:
@@ -132,6 +170,10 @@ class TeacherManager:
             dict: {"teacher_log_probs": Tensor [B, T]}. Position 0 of every
             sequence is nan (no preceding context). Padded positions (where
             attention_mask == 0) are ALSO set to nan.
+            When self.loss_type == "topk", also includes:
+            {"teacher_topk_ids": LongTensor [B, T, K], "teacher_topk_logprobs":
+            Tensor [B, T, K]}, padded with (_TOPK_PAD_TOKEN_ID, _TOPK_PAD_LOGPROB)
+            wherever fewer than K candidates are available.
         """
         with torch.no_grad():
             seq_lens = attention_mask.sum(dim=1).tolist()
@@ -139,6 +181,8 @@ class TeacherManager:
                 token_ids[i, : seq_lens[i]].cpu().tolist()
                 for i in range(token_ids.shape[0])
             ]
+
+            use_topk = self.loss_type == "topk"
 
             payload = {
                 "input_ids": input_ids_list,
@@ -149,6 +193,8 @@ class TeacherManager:
                 "return_logprob": True,
                 "logprob_start_len": 0,
             }
+            if use_topk:
+                payload["top_logprobs_num"] = self.topk_k
 
             host, port = self._engine_addrs[self._next_engine]
             self._next_engine = (self._next_engine + 1) % len(self._engine_addrs)
@@ -161,9 +207,11 @@ class TeacherManager:
             except requests.exceptions.RequestException as e:
                 logger.error(f"Teacher score HTTP request failed: {e}")
                 raise
-            
+
             max_len = token_ids.shape[1]
             teacher_log_probs_list = []
+            teacher_topk_ids_list = []
+            teacher_topk_logprobs_list = []
             for i, r in enumerate(result):
                 meta = r.get("meta_info", {})
                 raw_entries = meta.get("input_token_logprobs", None)
@@ -187,8 +235,41 @@ class TeacherManager:
 
                 teacher_log_probs_list.append(log_probs_tensor)
 
-            teacher_log_probs_tensor = torch.stack(teacher_log_probs_list)
-            return {"teacher_log_probs": teacher_log_probs_tensor}
+                if use_topk:
+                    raw_topk_entries = meta.get("input_top_logprobs", None)
+                    if raw_topk_entries is None:
+                        raise ValueError(f"Missing input_top_logprobs in {meta.keys()}")
+
+                    ids_rows = []
+                    lp_rows = []
+                    for entry in raw_topk_entries:
+                        ids_row, lp_row = _parse_teacher_topk_entry(entry, self.topk_k)
+                        ids_rows.append(ids_row)
+                        lp_rows.append(lp_row)
+
+                    ids_tensor = torch.tensor(ids_rows, dtype=torch.long)
+                    lp_tensor = torch.tensor(lp_rows, dtype=torch.float32)
+
+                    # Pad back up to max_len (seq dim) with the same sentinel.
+                    if ids_tensor.shape[0] < max_len:
+                        pad_len = max_len - ids_tensor.shape[0]
+                        ids_tensor = torch.cat(
+                            [ids_tensor, torch.full((pad_len, self.topk_k), _TOPK_PAD_TOKEN_ID, dtype=torch.long)],
+                            dim=0,
+                        )
+                        lp_tensor = torch.cat(
+                            [lp_tensor, torch.full((pad_len, self.topk_k), _TOPK_PAD_LOGPROB, dtype=torch.float32)],
+                            dim=0,
+                        )
+
+                    teacher_topk_ids_list.append(ids_tensor)
+                    teacher_topk_logprobs_list.append(lp_tensor)
+
+            out = {"teacher_log_probs": torch.stack(teacher_log_probs_list)}
+            if use_topk:
+                out["teacher_topk_ids"] = torch.stack(teacher_topk_ids_list)
+                out["teacher_topk_logprobs"] = torch.stack(teacher_topk_logprobs_list)
+            return out
  
     def offload(self, tags: list[str] | None = None):
         """Offload teacher weights to CPU to free GPU memory during student training."""
@@ -342,7 +423,9 @@ class MopdRouter:
                             (e.g. ``rd.get("domain")`` or ``["math"] * B``)
 
         Returns:
-            dict: {"teacher_log_probs": Tensor [B, T]}
+            dict: {"teacher_log_probs": Tensor [B, T]}, plus {"teacher_topk_ids":
+            Tensor [B, T, K], "teacher_topk_logprobs": Tensor [B, T, K]} when the
+            routed teachers were built with --opd-loss-type=topk.
         """
         # ── 1. Group sample indices by resolved teacher name ──────────────
         groups: dict[str, list[int]] = defaultdict(list)
@@ -362,13 +445,30 @@ class MopdRouter:
         # ── 3. Collect and reassemble in original sample order ────────────
         B, T = token_ids.shape
         out_logprobs = torch.full((B, T), float("nan"), dtype=torch.float32)
+        out_topk_ids: torch.Tensor | None = None
+        out_topk_logprobs: torch.Tensor | None = None
         for teacher_name, (indices, future) in pending.items():
             sub_out = ray.get(future)
             sub_logprobs = sub_out["teacher_log_probs"]  # [len(indices), T]
             for j, orig_idx in enumerate(indices):
                 out_logprobs[orig_idx] = sub_logprobs[j]
 
-        return {"teacher_log_probs": out_logprobs}
+            if "teacher_topk_ids" in sub_out:
+                if out_topk_ids is None:
+                    k = sub_out["teacher_topk_ids"].shape[-1]
+                    out_topk_ids = torch.full((B, T, k), _TOPK_PAD_TOKEN_ID, dtype=torch.long)
+                    out_topk_logprobs = torch.full((B, T, k), _TOPK_PAD_LOGPROB, dtype=torch.float32)
+                sub_topk_ids = sub_out["teacher_topk_ids"]  # [len(indices), T, K]
+                sub_topk_logprobs = sub_out["teacher_topk_logprobs"]
+                for j, orig_idx in enumerate(indices):
+                    out_topk_ids[orig_idx] = sub_topk_ids[j]
+                    out_topk_logprobs[orig_idx] = sub_topk_logprobs[j]
+
+        out = {"teacher_log_probs": out_logprobs}
+        if out_topk_ids is not None:
+            out["teacher_topk_ids"] = out_topk_ids
+            out["teacher_topk_logprobs"] = out_topk_logprobs
+        return out
 
     def offload(self, tags: list | None = None):
         """Offload all teacher weights to CPU (free GPU memory during student training)."""

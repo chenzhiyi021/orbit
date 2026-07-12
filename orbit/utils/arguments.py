@@ -1765,6 +1765,26 @@ def get_orbit_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--opd-loss-type",
+                type=str,
+                choices=["sampled_token", "topk"],
+                default="sampled_token",
+                help=(
+                    "How to estimate the teacher/student advantage for "
+                    "--advantage-estimator on_policy_distillation. 'sampled_token': "
+                    "single-sample estimate using only the token the student actually "
+                    "sampled (teacher_log_prob - student_log_prob). 'topk': multi-token "
+                    "estimate that sums teacher_prob * (teacher_log_prob - student_log_prob) "
+                    "over the teacher's top-k token distribution at each position."
+                ),
+            )
+            parser.add_argument(
+                "--opd-topk-k",
+                type=int,
+                default=32,
+                help="Number of top tokens requested from the teacher when --opd-loss-type=topk.",
+            )
+            parser.add_argument(
                 "--debug-colocate",
                 action="store_true",
                 default=False,
@@ -2331,6 +2351,16 @@ def orbit_validate_args(args):
         assert args.normalize_advantages, (
             "The 'reinforce_plus_plus' and 'reinforce_plus_plus_baseline' advantage estimators "
             "require advantage normalization. Please add `--normalize-advantages` to your command."
+        )
+
+    if args.opd_loss_type == "topk":
+        assert args.advantage_estimator == "on_policy_distillation", (
+            "--opd-loss-type topk only applies to --advantage-estimator on_policy_distillation."
+        )
+        assert args.opd_topk_k > 0, "--opd-topk-k must be positive when --opd-loss-type=topk."
+        assert not args.allgather_cp, (
+            "--opd-loss-type topk does not support --allgather-cp yet: the CP redistribution "
+            "helper only handles 1D per-token tensors, not the [R, K] top-k tensors."
         )
 
     if args.use_rollout_logprobs:

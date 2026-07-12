@@ -92,6 +92,8 @@ OPD_ARGS=(
     --advantage-estimator on_policy_distillation
     --loss-type policy_loss
     --opd_teacher_mem_fraction_static 0.25
+    --opd-loss-type topk
+    --opd-topk-k 16
 )
 
 LOSS_ARGS=(

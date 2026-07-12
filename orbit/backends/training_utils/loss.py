@@ -202,6 +202,7 @@ def get_log_probs_and_entropy(
     entropy_no_grad: bool = False,
     non_loss_data: bool = True,
     max_seq_lens: list[int] | None = None,
+    teacher_topk_ids: list[torch.Tensor] | None = None,
 ) -> dict[str, list[torch.Tensor]]:
     """Compute per-token log-probabilities (and optionally entropy) on responses.
 
@@ -219,23 +220,43 @@ def get_log_probs_and_entropy(
         response_lengths: Response segment lengths per sample.
         with_entropy: If True, include "entropy" key in result.
         non_loss_data: Unused; kept for API compatibility.
+        teacher_topk_ids: For on_policy_distillation's "topk" mode, a list of
+            `[R, K]` token-id tensors (one per sample, from TeacherManager) to
+            additionally gather student log-probs for at each response
+            position. When None (the default), no extra gather is done.
 
     Returns:
         Dict with key "log_probs" mapping to a list of `[R]` tensors per
         sample. If `with_entropy` is True, also includes "entropy" key with
-        a list of `[R]` tensors.
+        a list of `[R]` tensors. If `teacher_topk_ids` is given, also
+        includes "student_topk_log_probs" mapping to a list of `[R, K]`
+        tensors.
     """
     parallel_state = get_parallel_state()
     assert non_loss_data
+
+    if teacher_topk_ids is not None and args.allgather_cp:
+        raise NotImplementedError(
+            "on_policy_distillation opd_loss_type='topk' does not support --allgather-cp: "
+            "the CP redistribution helper only handles 1D per-token tensors, not the "
+            "[R, K] student_topk_log_probs tensor."
+        )
+
     log_probs_list = []
     entropy_list = []
-    for logits_chunk, tokens_chunk in get_responses(
-        logits,
-        args=args,
-        unconcat_tokens=unconcat_tokens,
-        total_lengths=total_lengths,
-        response_lengths=response_lengths,
-        max_seq_lens=max_seq_lens,
+    topk_log_probs_list = [] if teacher_topk_ids is not None else None
+    topk_ids_iter = teacher_topk_ids if teacher_topk_ids is not None else [None] * len(unconcat_tokens)
+    for (logits_chunk, tokens_chunk), sample_topk_ids in zip(
+        get_responses(
+            logits,
+            args=args,
+            unconcat_tokens=unconcat_tokens,
+            total_lengths=total_lengths,
+            response_lengths=response_lengths,
+            max_seq_lens=max_seq_lens,
+        ),
+        topk_ids_iter,
+        strict=True,
     ):
         log_prob, entropy = calculate_log_probs_and_entropy(
             logits_chunk,
@@ -250,11 +271,31 @@ def get_log_probs_and_entropy(
         log_probs_list.append(log_prob.squeeze(-1))
         entropy_list.append(entropy)
 
+        if sample_topk_ids is not None:
+            k = sample_topk_ids.size(-1)
+            if logits_chunk.size(0) == 0:
+                topk_log_probs_list.append(logits_chunk.new_zeros((0, k)))
+            else:
+                per_k_log_probs = []
+                for k_idx in range(k):
+                    topk_log_prob, _ = calculate_log_probs_and_entropy(
+                        logits_chunk,
+                        sample_topk_ids[:, k_idx],
+                        parallel_state.tp.group,
+                        with_entropy=False,
+                        chunk_size=args.log_probs_chunk_size,
+                        true_on_policy=args.true_on_policy_mode,
+                    )
+                    per_k_log_probs.append(topk_log_prob.squeeze(-1))
+                topk_log_probs_list.append(torch.stack(per_k_log_probs, dim=-1))
+
     res = {
         "log_probs": log_probs_list,
     }
     if with_entropy:
         res["entropy"] = entropy_list
+    if topk_log_probs_list is not None:
+        res["student_topk_log_probs"] = topk_log_probs_list
 
     # we need to turn the all gather kv into zigzag ring attn kv
     if args.allgather_cp:
@@ -280,6 +321,7 @@ def get_values(
     with_entropy: bool = False,
     non_loss_data: bool = True,
     max_seq_lens: list[int] | None = None,
+    teacher_topk_ids: list[torch.Tensor] | None = None,
 ) -> dict[str, list[torch.Tensor]]:
     """Extract per-token value predictions over response tokens.
 
@@ -295,6 +337,9 @@ def get_values(
         response_lengths: Response segment lengths per sample.
         with_entropy: Unused; kept for signature compatibility.
         non_loss_data: Unused; kept for signature compatibility.
+        teacher_topk_ids: Unused; kept for signature compatibility with
+            `forward_only`'s generic callback dispatch (see
+            `get_log_probs_and_entropy`).
 
     Returns:
         Dict with key "values" mapping to a list of `[R]` value tensors
@@ -327,6 +372,31 @@ def get_values(
         )
 
     return res
+
+
+def _topk_kl_advantage(teacher_topk_logprobs: torch.Tensor, student_topk_logprobs: torch.Tensor) -> torch.Tensor:
+    """Per-token on_policy_distillation advantage from top-k teacher/student log-probs.
+
+    Estimates `sum_v teacher_prob(v) * (teacher_log_prob(v) - student_log_prob(v))`,
+    truncated to the teacher's top-k support at each position (not renormalized: the
+    dropped tail mass is treated as contributing ~0, same as it would in the exact
+    full-vocab KL). This is a lower-variance generalization of the "sampled_token"
+    single-sample estimate (`teacher_log_prob - student_log_prob` at the one token the
+    student sampled).
+
+    Padded slots (see `orbit.ray.teacher._TOPK_PAD_LOGPROB`) carry a teacher log-prob of
+    -1e4, so `exp()` underflows to exactly 0.0 in float32 and contributes nothing to the
+    sum -- no separate validity mask is needed.
+
+    Args:
+        teacher_topk_logprobs: `[R, K]` teacher log-probs at its own top-k token ids.
+        student_topk_logprobs: `[R, K]` student log-probs at those same token ids.
+
+    Returns:
+        `[R]` tensor of per-token advantages.
+    """
+    weights = teacher_topk_logprobs.exp()
+    return (weights * (teacher_topk_logprobs - student_topk_logprobs)).sum(dim=-1)
 
 
 def compute_advantages_and_returns(args: Namespace, rollout_data: RolloutBatch) -> None:
@@ -423,18 +493,33 @@ def compute_advantages_and_returns(args: Namespace, rollout_data: RolloutBatch) 
 
     elif args.advantage_estimator == "on_policy_distillation":
         student_log_probs = log_probs
-        teacher_log_probs = rollout_data.get("teacher_log_probs")
         response_lengths = rollout_data.get("response_lengths")
         device = student_log_probs[0].device
-        teacher_log_probs = [t_log_prob.to(device=device) for t_log_prob in teacher_log_probs]
-        teacher_log_probs = [
-            t_log_prob[-response_length:]
-            for t_log_prob, response_length in zip(teacher_log_probs, response_lengths, strict=False)
-        ]
-        advantages = [
-            teacher_log_prob - student_log_prob
-            for teacher_log_prob, student_log_prob in zip(teacher_log_probs, student_log_probs, strict=False)
-        ]
+
+        if getattr(args, "opd_loss_type", "sampled_token") == "topk":
+            teacher_topk_logprobs = rollout_data.get("teacher_topk_logprobs")
+            student_topk_log_probs = rollout_data.get("student_topk_log_probs")
+            teacher_topk_logprobs = [t.to(device=device) for t in teacher_topk_logprobs]
+            teacher_topk_logprobs = [
+                t[-response_length:]
+                for t, response_length in zip(teacher_topk_logprobs, response_lengths, strict=True)
+            ]
+            advantages = [
+                _topk_kl_advantage(t_lp, s_lp)
+                for t_lp, s_lp in zip(teacher_topk_logprobs, student_topk_log_probs, strict=True)
+            ]
+        else:
+            teacher_log_probs = rollout_data.get("teacher_log_probs")
+            teacher_log_probs = [t_log_prob.to(device=device) for t_log_prob in teacher_log_probs]
+            # TODO: strict should be True?
+            teacher_log_probs = [
+                t_log_prob[-response_length:]
+                for t_log_prob, response_length in zip(teacher_log_probs, response_lengths, strict=False)
+            ]
+            advantages = [
+                teacher_log_prob - student_log_prob
+                for teacher_log_prob, student_log_prob in zip(teacher_log_probs, student_log_probs, strict=False)
+            ]
         returns = advantages
 
     else:

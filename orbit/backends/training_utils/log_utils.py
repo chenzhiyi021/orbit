@@ -123,6 +123,13 @@ def log_rollout_data(rollout_id: int, args: Namespace, rollout_data: RolloutBatc
                 "dynamic_global_batch_size",
                 "weight_versions",
                 "metadata",
+                # [R, K] tensors from on_policy_distillation's opd_loss_type="topk":
+                # teacher_topk_ids is integer-typed (torch.Tensor.mean() is not
+                # implemented for Long) and the other two aren't meaningful as a
+                # flat per-rollout mean.
+                "teacher_topk_ids",
+                "teacher_topk_logprobs",
+                "student_topk_log_probs",
             ]:
                 continue
             # Upload per sample mean for each rollout value

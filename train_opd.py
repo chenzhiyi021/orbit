@@ -177,8 +177,25 @@ async def train(args):
                         zip(total_lengths, response_lengths, strict=False)
                     )
                 ]
+                teacher_signal = {"teacher_log_probs": response_teacher_log_probs}
 
-                rd = merge_teacher_signal(rd, {"teacher_log_probs": response_teacher_log_probs})
+                if "teacher_topk_ids" in teacher_output:
+                    full_teacher_topk_ids = teacher_output["teacher_topk_ids"]  # [B, max_len, K]
+                    full_teacher_topk_logprobs = teacher_output["teacher_topk_logprobs"]
+                    teacher_signal["teacher_topk_ids"] = [
+                        full_teacher_topk_ids[i, total_len - resp_len : total_len]
+                        for i, (total_len, resp_len) in enumerate(
+                            zip(total_lengths, response_lengths, strict=False)
+                        )
+                    ]
+                    teacher_signal["teacher_topk_logprobs"] = [
+                        full_teacher_topk_logprobs[i, total_len - resp_len : total_len]
+                        for i, (total_len, resp_len) in enumerate(
+                            zip(total_lengths, response_lengths, strict=False)
+                        )
+                    ]
+
+                rd = merge_teacher_signal(rd, teacher_signal)
                 opd_data_refs.append(Box(ray.put(rd)))
 
         async with _timed_phase(prefix, "actor train", timing_raw=timing_raw):

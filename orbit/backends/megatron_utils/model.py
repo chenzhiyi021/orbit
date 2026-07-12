@@ -263,6 +263,9 @@ def forward_only(
                 "total_lengths",
                 "response_lengths",
                 "max_seq_lens",
+                # Only present for on_policy_distillation's opd_loss_type="topk"; None
+                # otherwise (get_next() returns None for keys absent from rollout_data).
+                "teacher_topk_ids",
             ],
             args.data_pad_size_multiplier,
             args.qkv_format,
@@ -291,6 +294,7 @@ def forward_only(
             response_lengths=response_lengths,
             with_entropy=args.use_rollout_entropy,
             max_seq_lens=batch.get("max_seq_lens", None),
+            teacher_topk_ids=batch.get("teacher_topk_ids", None),
         )
 
     # Turn on evaluation mode which disables dropout.

@@ -788,11 +788,12 @@ class MegatronTrainRayActor(TrainRayActor):
  
 def _is_opd_batch(rollout_data: RolloutBatch) -> bool:
     """Return True if rollout_data contains teacher signal from TeacherServer.
- 
-    Checks for any of the three possible teacher output keys so this works
-    regardless of which loss_type was used during scoring.
+
+    Checks for any of the possible teacher output keys so this works regardless
+    of which opd_loss_type was used during scoring ("teacher_log_probs" for
+    sampled_token/topk, "teacher_logits" reserved for a future full_vocab mode).
     """
     return any(
         k in rollout_data
-        for k in ("teacher_log_probs", "topk_logits", "teacher_logits")
+        for k in ("teacher_log_probs", "teacher_topk_ids", "teacher_logits")
     )
