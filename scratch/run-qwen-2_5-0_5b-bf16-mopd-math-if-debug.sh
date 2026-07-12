@@ -118,7 +118,7 @@ echo ""
 # SGLang server on the same GPU) -- the mem_fraction_static values below and
 # --sglang-mem-fraction-static are conservative starting points, not tuned;
 # if you OOM, shrink those first before adding a second GPU.
-GPUS_PER_NODE=1
+GPUS_PER_NODE=2
 RAY_NUM_CPUS=128
 
 # === Model args ===
@@ -133,7 +133,10 @@ TRAIN_ROWS=${TRAIN_ROWS:-$(wc -l < "${TRAIN_JSONL}")}
 NUM_ROLLOUT=${NUM_ROLLOUT:-$(( (TRAIN_ROWS * TOTAL_EPOCHS + ROLLOUT_BATCH_SIZE - 1) / ROLLOUT_BATCH_SIZE ))}
 
 # === ARGS arrays ===
-COLOCATE_ARGS=( --debug-colocate )
+COLOCATE_ARGS=(
+    --colocate
+    --actor-num-gpus-per-node 1
+)
 
 CKPT_ARGS=(
     --hf-checkpoint "${HF_CKPT}"
