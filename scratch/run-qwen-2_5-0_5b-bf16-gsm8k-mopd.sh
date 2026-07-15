@@ -23,9 +23,9 @@ ORBIT_ENTRYPOINT="${ORBIT_ENTRYPOINT:-${ORBIT_ROOT}/train_opd.py}"
 RUN_LOG="${ORBIT_ROOT}/logs/${LAUNCHER_NAME}_$(date +%Y%m%d_%H%M%S).log"
 
 # === Paths ===
-HF_CKPT="/mnt/L202500431/models/qwen2.5-0.5b-instruct"
-MEGATRON_LOAD="/mnt/L202500431/models/megatron_ckpt/qwen2.5-0.5b-instruct"
-SAVE_DIR="${ORBIT_ROOT}/orbit_ckpts/Qwen2.5-0.5B-Instruct_gsm8k_mopd"
+HF_CKPT="/mnt/L202500431/models/qwen2.5-1.5b-instruct"
+MEGATRON_LOAD="/mnt/L202500431/models/megatron_ckpt/qwen2.5-1.5b-instruct"
+SAVE_DIR="${ORBIT_ROOT}/orbit_ckpts/Qwen2.5-1.5b-Instruct_gsm8k_mopd"
 TRAIN_JSONL="/mnt/L202500431/datasets/gsm8k/main/train-00000-of-00001.parquet"
 TEST_JSONL="/mnt/L202500431/datasets/gsm8k/main/test-00000-of-00001.parquet"
 
@@ -102,7 +102,7 @@ GPUS_PER_NODE=2
 RAY_NUM_CPUS=128
 
 # === Model args ===
-source "${ORBIT_ROOT}/orbit_plugins/model_args/qwen2.5-0.5B.sh"
+source "${ORBIT_ROOT}/orbit_plugins/model_args/qwen2.5-1.5B.sh"
 
 # === Training schedule ===
 TOTAL_EPOCHS="${TOTAL_EPOCHS:-15}"

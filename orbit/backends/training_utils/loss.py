@@ -13,6 +13,7 @@ from orbit.utils.ppo_utils import (
     compute_gspo_kl,
     compute_opsm_mask,
     compute_policy_loss,
+    compute_vocab_parallel_topk_log_probs,
     get_advantages_and_returns_batch,
     get_grpo_returns,
     get_reinforce_plus_plus_baseline_advantages,
@@ -272,22 +273,20 @@ def get_log_probs_and_entropy(
         entropy_list.append(entropy)
 
         if sample_topk_ids is not None:
-            k = sample_topk_ids.size(-1)
-            if logits_chunk.size(0) == 0:
-                topk_log_probs_list.append(logits_chunk.new_zeros((0, k)))
-            else:
-                per_k_log_probs = []
-                for k_idx in range(k):
-                    topk_log_prob, _ = calculate_log_probs_and_entropy(
-                        logits_chunk,
-                        sample_topk_ids[:, k_idx],
-                        parallel_state.tp.group,
-                        with_entropy=False,
-                        chunk_size=args.log_probs_chunk_size,
-                        true_on_policy=args.true_on_policy_mode,
-                    )
-                    per_k_log_probs.append(topk_log_prob.squeeze(-1))
-                topk_log_probs_list.append(torch.stack(per_k_log_probs, dim=-1))
+            # Deliberately not calculate_log_probs_and_entropy/fused_vocab_parallel_
+            # cross_entropy here: that path is wrapped in @jit_fuser (torch.compile),
+            # which recompiles/re-autotunes per new input shape. Calling it many times
+            # (once per top-k slot) from inside a pipeline-parallel forward_step has
+            # been observed to crash with "CUDA driver error: invalid argument" during
+            # Triton autotuning. compute_vocab_parallel_topk_log_probs uses only plain
+            # eager ops and computes the log-normalizer once for all k.
+            topk_log_probs_list.append(
+                compute_vocab_parallel_topk_log_probs(
+                    logits_chunk,
+                    sample_topk_ids,
+                    parallel_state.tp.group,
+                )
+            )
 
     res = {
         "log_probs": log_probs_list,

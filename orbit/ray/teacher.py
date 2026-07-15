@@ -203,7 +203,7 @@ class TeacherManager:
             try:
                 response = requests.post(url, json=payload, timeout=30.0)
                 response.raise_for_status()
-                result = response.json() # result is list of dicts.
+                result: list[dict] = response.json()
             except requests.exceptions.RequestException as e:
                 logger.error(f"Teacher score HTTP request failed: {e}")
                 raise

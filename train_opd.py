@@ -143,8 +143,6 @@ async def train(args):
             async with _timed_phase(prefix, "prefetch train state", timing_raw=timing_raw):
                 await actor_model.prefetch_train_state(rollout_id)
 
-        # MOPD extension point: replace single score.remote() with a routing
-        # layer that dispatches to multiple teachers by domain/task.
         async with _timed_phase(prefix, "teacher score", timing_raw=timing_raw):
             opd_data_refs = []
             for ref in rollout_data_ref:

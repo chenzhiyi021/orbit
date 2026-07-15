@@ -93,7 +93,7 @@ OPD_ARGS=(
     --loss-type policy_loss
     --opd_teacher_mem_fraction_static 0.25
     --opd-loss-type topk
-    --opd-topk-k 16
+    --opd-topk-k 8
 )
 
 LOSS_ARGS=(

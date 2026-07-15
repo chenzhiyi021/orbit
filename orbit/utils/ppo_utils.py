@@ -206,6 +206,70 @@ def compute_entropy_from_logits(logits: torch.Tensor, process_group) -> torch.Te
     return _VocabParallelEntropy.apply(logits, process_group)
 
 
+def compute_vocab_parallel_topk_log_probs(
+    logits: torch.Tensor, topk_ids: torch.Tensor, process_group: dist.ProcessGroup
+) -> torch.Tensor:
+    """Gather log-probs at externally supplied token ids from vocab-parallel logits.
+
+    Used by on_policy_distillation's "topk" advantage estimator to score the
+    student at the teacher's top-k token ids. Deliberately avoids Megatron's
+    `fused_vocab_parallel_cross_entropy` (which is wrapped in `@jit_fuser` /
+    torch.compile): that kernel recompiles and re-autotunes per new input shape,
+    and calling it many times in a tight loop from inside a pipeline-parallel
+    `forward_step` (once per top-k slot) has been observed to crash with
+    "CUDA driver error: invalid argument" during Triton autotuning. This
+    implementation uses only plain eager ops (mirrors the masked-gather +
+    all-reduce pattern Megatron's own vocab-parallel cross-entropy uses
+    internally, and the log-sum-exp all-reduce pattern already used by
+    `_VocabParallelEntropy` above), and computes the log-normalizer once and
+    reuses it for every id instead of recomputing it per call.
+
+    No gradients are needed here (this only feeds a REINFORCE-style advantage,
+    computed in a forward_only/no_grad context), so this intentionally does not
+    support backward.
+
+    Args:
+        logits: `[R, V_local]` vocab-parallel logits (this rank's shard).
+        topk_ids: `[R, K]` global (unsharded) token ids to gather log-probs for.
+        process_group: Tensor-parallel process group.
+
+    Returns:
+        `[R, K]` log-probs.
+    """
+    k = topk_ids.size(-1)
+    if logits.size(0) == 0:
+        return logits.new_zeros((0, k))
+
+    with torch.no_grad():
+        # teacher_topk_ids arrives from TeacherManager via Ray (CPU tensor); logits is
+        # the direct output of the student's own forward pass (GPU). Move to match
+        # before indexing -- torch.gather requires index and input on the same device.
+        topk_ids = topk_ids.to(device=logits.device)
+        logits = logits.float()
+        tp_rank = dist.get_rank(group=process_group)
+        partition_vocab_size = logits.size(-1)
+        vocab_start_index = tp_rank * partition_vocab_size
+        vocab_end_index = vocab_start_index + partition_vocab_size
+
+        logits_max = logits.max(dim=-1, keepdim=True).values
+        dist.all_reduce(logits_max, op=dist.ReduceOp.MAX, group=process_group)
+        sum_exp_logits = (logits - logits_max).exp().sum(dim=-1, keepdim=True)
+        dist.all_reduce(sum_exp_logits, group=process_group)
+        log_normalizer = logits_max.squeeze(-1) + sum_exp_logits.squeeze(-1).log()  # [R]
+
+        log_probs = []
+        for k_idx in range(k):
+            ids = topk_ids[:, k_idx]
+            local_ids = (ids - vocab_start_index).clamp(0, partition_vocab_size - 1)
+            owned_mask = (ids >= vocab_start_index) & (ids < vocab_end_index)
+            gathered_logit = torch.gather(logits, dim=-1, index=local_ids.unsqueeze(-1)).squeeze(-1)
+            gathered_logit = torch.where(owned_mask, gathered_logit, torch.zeros_like(gathered_logit))
+            dist.all_reduce(gathered_logit, group=process_group)
+            log_probs.append(gathered_logit - log_normalizer)
+
+        return torch.stack(log_probs, dim=-1)
+
+
 def get_grpo_returns(
     rewards: torch.Tensor,
     kl: list[torch.Tensor],
