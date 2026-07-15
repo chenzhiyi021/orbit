@@ -29,8 +29,11 @@ logger = logging.getLogger(__name__)
 _TOPK_PAD_LOGPROB = -1e4
 _TOPK_PAD_TOKEN_ID = 0
 
+_TeacherTopkCandidate = list[float | int | str | None] | dict[str, int | float | None]
+_TeacherTopkEntry = list[_TeacherTopkCandidate] | None
 
-def _parse_teacher_topk_entry(entry, k: int) -> tuple[list[int], list[float]]:
+
+def _parse_teacher_topk_entry(entry: _TeacherTopkEntry, k: int) -> tuple[list[int], list[float]]:
     """Normalize one position's SGLang top-k payload into fixed-size (k) id/logprob lists.
 
     SGLang's `input_top_logprobs` entries are normally a list of `[logprob, token_id, text]`
@@ -53,9 +56,9 @@ def _parse_teacher_topk_entry(entry, k: int) -> tuple[list[int], list[float]]:
             ids.append(int(token_id))
             logprobs.append(float(logprob))
 
-    while len(ids) < k:
-        ids.append(_TOPK_PAD_TOKEN_ID)
-        logprobs.append(_TOPK_PAD_LOGPROB)
+    # while len(ids) < k:
+    #     ids.append(_TOPK_PAD_TOKEN_ID)
+    #     logprobs.append(_TOPK_PAD_LOGPROB)
 
     return ids, logprobs
 
