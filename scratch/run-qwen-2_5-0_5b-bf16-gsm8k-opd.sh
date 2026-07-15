@@ -94,6 +94,7 @@ OPD_ARGS=(
     --opd_teacher_mem_fraction_static 0.25
     --opd-loss-type topk
     --opd-topk-k 8
+    --opd-topk-renormalize
 )
 
 LOSS_ARGS=(

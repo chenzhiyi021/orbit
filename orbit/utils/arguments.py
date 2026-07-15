@@ -1785,6 +1785,15 @@ def get_orbit_extra_args_provider(add_custom_arguments=None):
                 help="Number of top tokens requested from the teacher when --opd-loss-type=topk.",
             )
             parser.add_argument(
+                "--opd-topk-renormalize",
+                action="store_true",
+                default=False,
+                help=(
+                    "When --opd-loss-type=topk, rescale the teacher's top-k weights to sum "
+                    "to 1 before weighting the advantage. Default (False)."
+                ),
+            )
+            parser.add_argument(
                 "--debug-colocate",
                 action="store_true",
                 default=False,
@@ -2362,6 +2371,8 @@ def orbit_validate_args(args):
             "--opd-loss-type topk does not support --allgather-cp yet: the CP redistribution "
             "helper only handles 1D per-token tensors, not the [R, K] top-k tensors."
         )
+    elif args.opd_topk_renormalize:
+        raise ValueError("--opd-topk-renormalize only applies when --opd-loss-type=topk.")
 
     if args.use_rollout_logprobs:
         assert not args.use_tis, "use_rollout_logprobs and use_tis cannot be set at the same time."

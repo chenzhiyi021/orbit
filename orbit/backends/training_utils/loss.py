@@ -373,29 +373,57 @@ def get_values(
     return res
 
 
-def _topk_kl_advantage(teacher_topk_logprobs: torch.Tensor, student_topk_logprobs: torch.Tensor) -> torch.Tensor:
+def _topk_kl_advantage(
+    teacher_topk_logprobs: torch.Tensor,
+    student_topk_logprobs: torch.Tensor,
+    renormalize: bool = False,
+) -> torch.Tensor:
     """Per-token on_policy_distillation advantage from top-k teacher/student log-probs.
 
     Estimates `sum_v teacher_prob(v) * (teacher_log_prob(v) - student_log_prob(v))`,
-    truncated to the teacher's top-k support at each position (not renormalized: the
-    dropped tail mass is treated as contributing ~0, same as it would in the exact
-    full-vocab KL). This is a lower-variance generalization of the "sampled_token"
-    single-sample estimate (`teacher_log_prob - student_log_prob` at the one token the
-    student sampled).
+    truncated to the teacher's top-k support at each position. This is a lower-variance
+    generalization of the "sampled_token" single-sample estimate (`teacher_log_prob -
+    student_log_prob` at the one token the student sampled).
 
     Padded slots (see `orbit.ray.teacher._TOPK_PAD_LOGPROB`) carry a teacher log-prob of
-    -1e4, so `exp()` underflows to exactly 0.0 in float32 and contributes nothing to the
-    sum -- no separate validity mask is needed.
+    -1e4, so `teacher_topk_logprobs.exp()` underflows to exactly 0.0 in float32 -- used
+    below as an exact (not approximate) validity mask.
 
     Args:
         teacher_topk_logprobs: `[R, K]` teacher log-probs at its own top-k token ids.
         student_topk_logprobs: `[R, K]` student log-probs at those same token ids.
+        renormalize: If False (default), `teacher_prob(v)` is used as-is (from the full
+            student/teacher vocab distributions), so the top-k weights sum to less than 1
+            and the dropped tail mass contributes ~0, same as it would in the exact
+            full-vocab KL -- matches the formula used by verl's OPD. If True, the teacher
+            *and* student distributions are each independently rescaled to sum to 1 over
+            the shared top-k support before computing the weighted log-ratio, so the
+            result is a proper KL divergence between two K-way categorical distributions
+            (matching HuggingFace TRL's `DistillationTrainer` `loss_top_k` behavior and
+            the renormalization recommended in "Your Teacher Can't Help You Here",
+            arXiv:2605.30833). Renormalizing only the teacher (weights) while leaving
+            student_topk_logprobs as full-vocab values would still let the optimizer lower
+            in-support student probabilities by pushing mass outside the top-k support,
+            since student's normalizer wouldn't see that shift -- both sides need their
+            own renormalization for the exploit the paper describes to actually be closed.
+            Padded slots are excluded from the student normalizer too (via the teacher
+            validity mask): a padded slot's real (repeated id=0) student log-prob would
+            otherwise leak into the student sum, which no equivalent problem exists for
+            unrenormalized weighting since padded teacher weights are already exactly 0.
 
     Returns:
         `[R]` tensor of per-token advantages.
     """
-    weights = teacher_topk_logprobs.exp()
-    return (weights * (teacher_topk_logprobs - student_topk_logprobs)).sum(dim=-1)
+    teacher_weights = teacher_topk_logprobs.exp()
+    if renormalize:
+        valid = teacher_weights > 0  # exact float32 underflow at padded slots, see above
+        student_weights = torch.where(valid, student_topk_logprobs.exp(), torch.zeros_like(student_topk_logprobs))
+        teacher_norm = teacher_weights.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+        student_norm = student_weights.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+        teacher_topk_logprobs = teacher_topk_logprobs - teacher_norm.log()
+        student_topk_logprobs = student_topk_logprobs - student_norm.log()
+        teacher_weights = teacher_weights / teacher_norm
+    return (teacher_weights * (teacher_topk_logprobs - student_topk_logprobs)).sum(dim=-1)
 
 
 def compute_advantages_and_returns(args: Namespace, rollout_data: RolloutBatch) -> None:
@@ -504,7 +532,7 @@ def compute_advantages_and_returns(args: Namespace, rollout_data: RolloutBatch) 
                 for t, response_length in zip(teacher_topk_logprobs, response_lengths, strict=True)
             ]
             advantages = [
-                _topk_kl_advantage(t_lp, s_lp)
+                _topk_kl_advantage(t_lp, s_lp, renormalize=args.opd_topk_renormalize)
                 for t_lp, s_lp in zip(teacher_topk_logprobs, student_topk_log_probs, strict=True)
             ]
         else:
