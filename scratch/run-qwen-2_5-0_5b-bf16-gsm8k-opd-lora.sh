@@ -92,9 +92,10 @@ OPD_ARGS=(
     --advantage-estimator on_policy_distillation
     --loss-type policy_loss
     --opd_teacher_mem_fraction_static 0.25
-    --opd-loss-type topk
-    --opd-topk-k 8
-    --opd-topk-renormalize
+    --opd-loss-type sampled_token
+#     --opd-loss-type topk
+#     --opd-topk-k 8
+#     --opd-topk-renormalize
 )
 
 LOSS_ARGS=(
@@ -166,14 +167,5 @@ PEFT_ARGS=(
     --lora-dropout 0.0
     --target-modules all-linear
 )
-
-# PEFT_ARGS=(
-#     --peft-method oft
-#     --peft-variant standard
-#     --oft-type canonical_oft
-#     --oft-block-size 128
-#     --oft-eps 6e-5
-#     --target-modules all-linear
-# )
 
 source "${ORBIT_ROOT}/scripts/lib/launcher.sh"
