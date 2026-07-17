@@ -21,7 +21,7 @@ HF_CKPT="/mnt/L202500431/models/qwen2.5-0.5b-instruct"
 # : "${HF_CKPT:?set HF_CKPT to a Hugging Face checkpoint path}"
 MEGATRON_LOAD="/mnt/L202500431/models/megatron_ckpt/qwen2.5-0.5b-instruct"
 # : "${MEGATRON_LOAD:?set MEGATRON_LOAD to a Megatron torch_dist checkpoint path}"
-SAVE_DIR="${ORBIT_ROOT}/orbit_ckpts/Qwen2.5-0.5B-Instruct_gsm8k_opd"
+SAVE_DIR="${ORBIT_ROOT}/orbit_ckpts/Qwen2.5-0.5B-Instruct_gsm8k_opd_lora"
 TRAIN_JSONL="/mnt/L202500431/datasets/gsm8k/main/train-00000-of-00001.parquet"
 # : "${TRAIN_JSONL:?set TRAIN_JSONL to a training jsonl path}"
 TEST_JSONL="/mnt/L202500431/datasets/gsm8k/main/test-00000-of-00001.parquet"
@@ -40,11 +40,18 @@ RAY_NUM_CPUS=128
 source "${ORBIT_ROOT}/orbit_plugins/model_args/qwen2.5-0.5B.sh"   # provides MODEL_ARGS=(...)
 
 # === Training schedule ===
-TOTAL_EPOCHS="${TOTAL_EPOCHS:-15}"
+TOTAL_EPOCHS="${TOTAL_EPOCHS:-20}"
 ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-32}"
-N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-2}"
+N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-4}"
 GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-64}"
-TRAIN_ROWS=${TRAIN_ROWS:-$(wc -l < "${TRAIN_JSONL}")}
+# `wc -l` undercounts .parquet files (binary) -- count rows with pyarrow instead.
+count_rows() {
+    case "$1" in
+        *.parquet) python3 -c "import pyarrow.parquet as pq; print(pq.ParquetFile('$1').metadata.num_rows)" ;;
+        *) wc -l < "$1" ;;
+    esac
+}
+TRAIN_ROWS=${TRAIN_ROWS:-$(count_rows "${TRAIN_JSONL}")}
 NUM_ROLLOUT=${NUM_ROLLOUT:-$(( (TRAIN_ROWS * TOTAL_EPOCHS + ROLLOUT_BATCH_SIZE - 1) / ROLLOUT_BATCH_SIZE ))}
 
 # === ARGS arrays ===
@@ -93,9 +100,6 @@ OPD_ARGS=(
     --loss-type policy_loss
     --opd_teacher_mem_fraction_static 0.25
     --opd-loss-type sampled_token
-#     --opd-loss-type topk
-#     --opd-topk-k 8
-#     --opd-topk-renormalize
 )
 
 LOSS_ARGS=(

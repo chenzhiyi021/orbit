@@ -9,7 +9,7 @@ source "${ORBIT_ROOT}/scripts/lib/tool_env.sh"
 source "${ORBIT_ROOT}/scripts/lib/common.sh"
 
 # === Recipe identity ===
-LAUNCHER_NAME=run_qwen25_05b_bf16_gsm8k_megatron_opd_oft
+LAUNCHER_NAME=run_qwen25_05b_base_bf16_gsm8k_megatron_opd_oft
 WANDB_PROJECT=${WANDB_PROJECT:-orbit-release}
 WANDB_GROUP=${WANDB_GROUP:-${LAUNCHER_NAME}}
 PRECISION_PROFILE=bf16
@@ -17,11 +17,11 @@ ORBIT_ENTRYPOINT="${ORBIT_ENTRYPOINT:-${ORBIT_ROOT}/train_opd.py}"
 RUN_LOG="${ORBIT_ROOT}/logs/${LAUNCHER_NAME}_$(date +%Y%m%d_%H%M%S).log"
 
 # === Paths ===
-HF_CKPT="/mnt/L202500431/models/qwen2.5-0.5b-instruct"
+HF_CKPT="/mnt/L202500431/models/qwen2.5-0.5b"
 # : "${HF_CKPT:?set HF_CKPT to a Hugging Face checkpoint path}"
-MEGATRON_LOAD="/mnt/L202500431/models/megatron_ckpt/qwen2.5-0.5b-instruct"
+MEGATRON_LOAD="/mnt/L202500431/models/megatron_ckpt/qwen2.5-0.5b"
 # : "${MEGATRON_LOAD:?set MEGATRON_LOAD to a Megatron torch_dist checkpoint path}"
-SAVE_DIR="${ORBIT_ROOT}/orbit_ckpts/Qwen2.5-0.5B-Instruct_gsm8k_opd_oft"
+SAVE_DIR="${ORBIT_ROOT}/orbit_ckpts/Qwen2.5-0.5B-base_gsm8k_opd_oft"
 TRAIN_JSONL="/mnt/L202500431/datasets/gsm8k/main/train-00000-of-00001.parquet"
 # : "${TRAIN_JSONL:?set TRAIN_JSONL to a training jsonl path}"
 TEST_JSONL="/mnt/L202500431/datasets/gsm8k/main/test-00000-of-00001.parquet"
@@ -29,7 +29,7 @@ TEST_JSONL="/mnt/L202500431/datasets/gsm8k/main/test-00000-of-00001.parquet"
 
 # Teacher checkpoint -- MUST be same-family (same tokenizer/vocab) as the
 # student checkpoint above.
-OPD_TEACHER_CKPT="/mnt/L202500431/models/qwen2.5-1.5b-instruct"
+OPD_TEACHER_CKPT="/mnt/L202500431/models/qwen2.5-1.5b"
 # : "${OPD_TEACHER_CKPT:?set OPD_TEACHER_CKPT to a Hugging Face checkpoint path}"
 
 # === Resources ===
