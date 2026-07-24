@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Qwen2.5-0.5B-Instruct BF16 + OFT on the math dataset. Self-contained launcher.
+# Qwen2.5-0.5B-Instruct BF16 + LoRA on the math dataset. Self-contained launcher.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-ORBIT_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
+ORBIT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 source "${ORBIT_ROOT}/scripts/lib/tool_env.sh"
 source "${ORBIT_ROOT}/scripts/lib/common.sh"
 
 # === Recipe identity ===
-LAUNCHER_NAME=run_qwen25_05b_bf16_math_megatron_oft_rlvr
+LAUNCHER_NAME=run_qwen25_05b_bf16_math_megatron_lora_rlvr
 WANDB_PROJECT=${WANDB_PROJECT:-orbit-release}
 WANDB_GROUP=${WANDB_GROUP:-${LAUNCHER_NAME}}
 PRECISION_PROFILE=bf16
@@ -20,8 +20,7 @@ HF_CKPT="/mnt/L202500431/models/qwen2.5-0.5b-instruct"
 # : "${HF_CKPT:?set HF_CKPT to a Hugging Face checkpoint path}"
 MEGATRON_LOAD="/mnt/L202500431/models/megatron_ckpt/qwen2.5-0.5b-instruct"
 # : "${MEGATRON_LOAD:?set MEGATRON_LOAD to a Megatron torch_dist checkpoint path}"
-SAVE_DIR="${ORBIT_ROOT}/orbit_ckpts/Qwen2.5-0.5B-Instruct_math_oft_rlvr_$(date +%Y%m%d_%H%M%S)"
-# : "${SAVE_DIR:?set SAVE_DIR to a save directory path}"
+SAVE_DIR="${ORBIT_ROOT}/orbit_ckpts/Qwen2.5-0.5B-Instruct_math_lora_rlvr_$(date +%Y%m%d_%H%M%S)"
 TRAIN_JSONL="/mnt/L202500431/datasets/gsm8k/main/train-00000-of-00001.parquet"
 # : "${TRAIN_JSONL:?set TRAIN_JSONL to a training jsonl path}"
 TEST_JSONL="/mnt/L202500431/datasets/gsm8k/main/test-00000-of-00001.parquet"
@@ -39,7 +38,14 @@ TOTAL_EPOCHS="${TOTAL_EPOCHS:-40}"
 ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-128}"
 N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-4}"
 GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-64}"
-TRAIN_ROWS=${TRAIN_ROWS:-$(wc -l < "${TRAIN_JSONL}")}
+# TRAIN_ROWS=${TRAIN_ROWS:-$(wc -l < "${TRAIN_JSONL}")}
+count_rows() {
+    case "$1" in
+        *.parquet) python3 -c "import pyarrow.parquet as pq; print(pq.ParquetFile('$1').metadata.num_rows)" ;;
+        *) wc -l < "$1" ;;
+    esac
+}
+TRAIN_ROWS=${TRAIN_ROWS:-$(count_rows "${TRAIN_JSONL}")}
 NUM_ROLLOUT=${NUM_ROLLOUT:-$(( (TRAIN_ROWS * TOTAL_EPOCHS + ROLLOUT_BATCH_SIZE - 1) / ROLLOUT_BATCH_SIZE ))}
 
 # === ARGS arrays ===
@@ -81,6 +87,7 @@ OPTIMIZER_ARGS=(
 
 RL_ARGS=(
     --advantage-estimator grpo
+    --use-kl-loss
     --kl-loss-coef 0.001
     --kl-loss-type low_var_kl
     --entropy-coef 0.0
@@ -150,11 +157,11 @@ DEBUG_ARGS=(
 )
 
 PEFT_ARGS=(
-    --peft-method oft
+    --peft-method lora
     --peft-variant standard
-    --oft-type canonical_oft
-    --oft-block-size 128
-    --oft-eps 6e-5
+    --lora-rank 32
+    --lora-alpha 64
+    --lora-dropout 0.0
     --target-modules all-linear
 )
 

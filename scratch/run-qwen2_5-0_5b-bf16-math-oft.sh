@@ -3,7 +3,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-ORBIT_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
+ORBIT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 source "${ORBIT_ROOT}/scripts/lib/tool_env.sh"
 source "${ORBIT_ROOT}/scripts/lib/common.sh"
 
@@ -39,7 +39,14 @@ TOTAL_EPOCHS="${TOTAL_EPOCHS:-40}"
 ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-128}"
 N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-4}"
 GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-64}"
-TRAIN_ROWS=${TRAIN_ROWS:-$(wc -l < "${TRAIN_JSONL}")}
+# `wc -l` undercounts .parquet files (binary) -- count rows with pyarrow instead.
+count_rows() {
+    case "$1" in
+        *.parquet) python3 -c "import pyarrow.parquet as pq; print(pq.ParquetFile('$1').metadata.num_rows)" ;;
+        *) wc -l < "$1" ;;
+    esac
+}
+TRAIN_ROWS=${TRAIN_ROWS:-$(count_rows "${TRAIN_JSONL}")}
 NUM_ROLLOUT=${NUM_ROLLOUT:-$(( (TRAIN_ROWS * TOTAL_EPOCHS + ROLLOUT_BATCH_SIZE - 1) / ROLLOUT_BATCH_SIZE ))}
 
 # === ARGS arrays ===
@@ -81,6 +88,7 @@ OPTIMIZER_ARGS=(
 
 RL_ARGS=(
     --advantage-estimator grpo
+    --use-kl-loss
     --kl-loss-coef 0.001
     --kl-loss-type low_var_kl
     --entropy-coef 0.0

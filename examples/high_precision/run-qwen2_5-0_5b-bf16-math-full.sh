@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Qwen2.5-0.5B-Instruct BF16 + OFT on the math dataset. Self-contained launcher.
+# Qwen2.5-0.5B-Instruct BF16 + Full on the math dataset. Self-contained launcher.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -8,7 +8,7 @@ source "${ORBIT_ROOT}/scripts/lib/tool_env.sh"
 source "${ORBIT_ROOT}/scripts/lib/common.sh"
 
 # === Recipe identity ===
-LAUNCHER_NAME=run_qwen25_05b_bf16_math_megatron_oft_rlvr
+LAUNCHER_NAME=run_qwen25_05b_bf16_math_megatron_full_rlvr
 WANDB_PROJECT=${WANDB_PROJECT:-orbit-release}
 WANDB_GROUP=${WANDB_GROUP:-${LAUNCHER_NAME}}
 PRECISION_PROFILE=bf16
@@ -20,7 +20,7 @@ HF_CKPT="/mnt/L202500431/models/qwen2.5-0.5b-instruct"
 # : "${HF_CKPT:?set HF_CKPT to a Hugging Face checkpoint path}"
 MEGATRON_LOAD="/mnt/L202500431/models/megatron_ckpt/qwen2.5-0.5b-instruct"
 # : "${MEGATRON_LOAD:?set MEGATRON_LOAD to a Megatron torch_dist checkpoint path}"
-SAVE_DIR="${ORBIT_ROOT}/orbit_ckpts/Qwen2.5-0.5B-Instruct_math_oft_rlvr_$(date +%Y%m%d_%H%M%S)"
+SAVE_DIR="${ORBIT_ROOT}/orbit_ckpts/Qwen2.5-0.5B-Instruct_math_full_rlvr_$(date +%Y%m%d_%H%M%S)"
 # : "${SAVE_DIR:?set SAVE_DIR to a save directory path}"
 TRAIN_JSONL="/mnt/L202500431/datasets/gsm8k/main/train-00000-of-00001.parquet"
 # : "${TRAIN_JSONL:?set TRAIN_JSONL to a training jsonl path}"
@@ -28,7 +28,7 @@ TEST_JSONL="/mnt/L202500431/datasets/gsm8k/main/test-00000-of-00001.parquet"
 # TEST_JSONL=${TEST_JSONL:-}
 
 # === Resources ===
-GPUS_PER_NODE=1
+GPUS_PER_NODE=2
 RAY_NUM_CPUS=32
 
 # === Model args ===
@@ -39,7 +39,14 @@ TOTAL_EPOCHS="${TOTAL_EPOCHS:-40}"
 ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-128}"
 N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-4}"
 GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-64}"
-TRAIN_ROWS=${TRAIN_ROWS:-$(wc -l < "${TRAIN_JSONL}")}
+# `wc -l` undercounts .parquet files (binary) -- count rows with pyarrow instead.
+count_rows() {
+    case "$1" in
+        *.parquet) python3 -c "import pyarrow.parquet as pq; print(pq.ParquetFile('$1').metadata.num_rows)" ;;
+        *) wc -l < "$1" ;;
+    esac
+}
+TRAIN_ROWS=${TRAIN_ROWS:-$(count_rows "${TRAIN_JSONL}")}
 NUM_ROLLOUT=${NUM_ROLLOUT:-$(( (TRAIN_ROWS * TOTAL_EPOCHS + ROLLOUT_BATCH_SIZE - 1) / ROLLOUT_BATCH_SIZE ))}
 
 # === ARGS arrays ===
@@ -48,6 +55,7 @@ COLOCATE_ARGS=( --colocate )
 CKPT_ARGS=(
     --hf-checkpoint "${HF_CKPT}"
     --load "${MEGATRON_LOAD}"
+    --ref-load "${MEGATRON_LOAD}"
     --save "${SAVE_DIR}"
     --save-interval 400
     --no-save-optim
@@ -72,7 +80,7 @@ ROLLOUT_ARGS=(
 
 OPTIMIZER_ARGS=(
     --optimizer adam
-    --lr 3e-6
+    --lr 1e-6
     --lr-decay-style constant
     --weight-decay 0.01
     --adam-beta1 0.9
@@ -81,6 +89,7 @@ OPTIMIZER_ARGS=(
 
 RL_ARGS=(
     --advantage-estimator grpo
+    --use-kl-loss
     --kl-loss-coef 0.001
     --kl-loss-type low_var_kl
     --entropy-coef 0.0
@@ -150,12 +159,7 @@ DEBUG_ARGS=(
 )
 
 PEFT_ARGS=(
-    --peft-method oft
-    --peft-variant standard
-    --oft-type canonical_oft
-    --oft-block-size 128
-    --oft-eps 6e-5
-    --target-modules all-linear
+    --peft-method none
 )
 
 source "${ORBIT_ROOT}/scripts/lib/launcher.sh"

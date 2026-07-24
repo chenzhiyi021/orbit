@@ -8,7 +8,7 @@ source "${ORBIT_ROOT}/scripts/lib/tool_env.sh"
 source "${ORBIT_ROOT}/scripts/lib/common.sh"
 
 # === Recipe identity ===
-LAUNCHER_NAME=run_qwen25_05b_bf16_math_megatron_lora
+LAUNCHER_NAME=run_qwen25_05b_bf16_math_megatron_lora_rlvr
 WANDB_PROJECT=${WANDB_PROJECT:-orbit-release}
 WANDB_GROUP=${WANDB_GROUP:-${LAUNCHER_NAME}}
 PRECISION_PROFILE=bf16
@@ -16,25 +16,36 @@ ORBIT_ENTRYPOINT="${ORBIT_ENTRYPOINT:-${ORBIT_ROOT}/train.py}"
 RUN_LOG="${ORBIT_ROOT}/logs/${LAUNCHER_NAME}_$(date +%Y%m%d_%H%M%S).log"
 
 # === Paths ===
-: "${HF_CKPT:?set HF_CKPT to a Hugging Face checkpoint path}"
-: "${MEGATRON_LOAD:?set MEGATRON_LOAD to a Megatron torch_dist checkpoint path}"
-SAVE_DIR="${ORBIT_ROOT}/orbit_ckpts/Qwen2.5-0.5B-Instruct_math_lora"
-: "${TRAIN_JSONL:?set TRAIN_JSONL to a training jsonl path}"
-TEST_JSONL=${TEST_JSONL:-}
+HF_CKPT="/mnt/L202500431/models/qwen2.5-0.5b-instruct"
+# : "${HF_CKPT:?set HF_CKPT to a Hugging Face checkpoint path}"
+MEGATRON_LOAD="/mnt/L202500431/models/megatron_ckpt/qwen2.5-0.5b-instruct"
+# : "${MEGATRON_LOAD:?set MEGATRON_LOAD to a Megatron torch_dist checkpoint path}"
+SAVE_DIR="${ORBIT_ROOT}/orbit_ckpts/Qwen2.5-0.5B-Instruct_math_lora_rlvr_$(date +%Y%m%d_%H%M%S)"
+TRAIN_JSONL="/mnt/L202500431/datasets/gsm8k/main/train-00000-of-00001.parquet"
+# : "${TRAIN_JSONL:?set TRAIN_JSONL to a training jsonl path}"
+TEST_JSONL="/mnt/L202500431/datasets/gsm8k/main/test-00000-of-00001.parquet"
+# TEST_JSONL=${TEST_JSONL:-}
 
 # === Resources ===
-GPUS_PER_NODE=4
+GPUS_PER_NODE=1
 RAY_NUM_CPUS=32
 
 # === Model args ===
 source "${ORBIT_ROOT}/orbit_plugins/model_args/qwen2.5-0.5B.sh"   # provides MODEL_ARGS=(...)
 
 # === Training schedule ===
-TOTAL_EPOCHS="${TOTAL_EPOCHS:-15}"
+TOTAL_EPOCHS="${TOTAL_EPOCHS:-40}"
 ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-128}"
 N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-4}"
 GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-64}"
-TRAIN_ROWS=${TRAIN_ROWS:-$(wc -l < "${TRAIN_JSONL}")}
+# TRAIN_ROWS=${TRAIN_ROWS:-$(wc -l < "${TRAIN_JSONL}")}
+count_rows() {
+    case "$1" in
+        *.parquet) python3 -c "import pyarrow.parquet as pq; print(pq.ParquetFile('$1').metadata.num_rows)" ;;
+        *) wc -l < "$1" ;;
+    esac
+}
+TRAIN_ROWS=${TRAIN_ROWS:-$(count_rows "${TRAIN_JSONL}")}
 NUM_ROLLOUT=${NUM_ROLLOUT:-$(( (TRAIN_ROWS * TOTAL_EPOCHS + ROLLOUT_BATCH_SIZE - 1) / ROLLOUT_BATCH_SIZE ))}
 
 # === ARGS arrays ===
@@ -44,7 +55,7 @@ CKPT_ARGS=(
     --hf-checkpoint "${HF_CKPT}"
     --load "${MEGATRON_LOAD}"
     --save "${SAVE_DIR}"
-    --save-interval 200
+    --save-interval 400
     --no-save-optim
     --no-save-rng
     --megatron-to-hf-mode bridge
@@ -52,9 +63,9 @@ CKPT_ARGS=(
 
 ROLLOUT_ARGS=(
     --prompt-data "${TRAIN_JSONL}"
-    --input-key prompt
-    --label-key label
-    --apply-chat-template
+    --input-key question
+    --label-key answer
+    # --apply-chat-template
     --rollout-shuffle
     --rm-type math
     --num-rollout "${NUM_ROLLOUT}"
