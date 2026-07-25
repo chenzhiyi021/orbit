@@ -29,7 +29,7 @@ TEST_JSONL="/mnt/L202500431/datasets/gsm8k/main/test-00000-of-00001.parquet"
 
 # Teacher checkpoint -- MUST be same-family (same tokenizer/vocab) as the
 # student checkpoint above.
-OPD_TEACHER_CKPT="/mnt/L202500431/models/qwen2.5-1.5b-instruct"
+OPD_TEACHER_CKPT="/mnt/L202500431/orbit/orbit_ckpts/Qwen2.5-0.5B-Instruct_math_full_rlvr_20260725_230112/iter_0000875"
 # : "${OPD_TEACHER_CKPT:?set OPD_TEACHER_CKPT to a Hugging Face checkpoint path}"
 
 # === Resources ===
@@ -97,7 +97,14 @@ OPD_ARGS=(
 #     --opd-loss-type sampled_token
     --opd-loss-type topk
     --opd-topk-k 8
-    --opd-topk-renormalize
+    # --opd-topk-renormalize divides by student_norm = sum of student's probability mass
+    # over just the teacher's K chosen ids -- this can be extremely small (student and
+    # teacher can disagree a lot early on), and d(log student_norm)/dtheta ~ 1/student_norm
+    # blows up well before clamp_min(1e-12) engages, dominating the clipped gradient
+    # direction. Disabled after this caused an immediate, much sharper eval collapse than
+    # the unrenormalized path -- needs a real fix (e.g. a much higher clamp floor, or
+    # skipping the term below some student_norm threshold) before re-enabling.
+#     --opd-topk-renormalize
 )
 
 LOSS_ARGS=(
