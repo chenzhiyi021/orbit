@@ -27,7 +27,7 @@ TEST_JSONL="/mnt/L202500431/datasets/gsm8k/main/test-00000-of-00001.parquet"
 # TEST_JSONL=${TEST_JSONL:-}
 
 # === Resources ===
-GPUS_PER_NODE=1
+GPUS_PER_NODE=2
 RAY_NUM_CPUS=32
 
 # === Model args ===
