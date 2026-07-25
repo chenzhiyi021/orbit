@@ -77,7 +77,7 @@ ROLLOUT_ARGS=(
 
 OPTIMIZER_ARGS=(
     --optimizer adam
-    --lr 3e-6
+    --lr 5e-7
     --lr-decay-style constant
     --weight-decay 0.01
     --adam-beta1 0.9
