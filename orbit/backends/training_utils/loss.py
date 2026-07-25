@@ -373,59 +373,6 @@ def get_values(
     return res
 
 
-def _topk_kl_advantage(
-    teacher_topk_logprobs: torch.Tensor,
-    student_topk_logprobs: torch.Tensor,
-    renormalize: bool = False,
-) -> torch.Tensor:
-    """Per-token on_policy_distillation advantage from top-k teacher/student log-probs.
-
-    Estimates `sum_v teacher_prob(v) * (teacher_log_prob(v) - student_log_prob(v))`,
-    truncated to the teacher's top-k support at each position. This is a lower-variance
-    generalization of the "sampled_token" single-sample estimate (`teacher_log_prob -
-    student_log_prob` at the one token the student sampled).
-
-    Padded slots (see `orbit.ray.teacher._TOPK_PAD_LOGPROB`) carry a teacher log-prob of
-    -1e4, so `teacher_topk_logprobs.exp()` underflows to exactly 0.0 in float32 -- used
-    below as an exact (not approximate) validity mask.
-
-    Args:
-        teacher_topk_logprobs: `[R, K]` teacher log-probs at its own top-k token ids.
-        student_topk_logprobs: `[R, K]` student log-probs at those same token ids.
-        renormalize: If False (default), `teacher_prob(v)` is used as-is (from the full
-            student/teacher vocab distributions), so the top-k weights sum to less than 1
-            and the dropped tail mass contributes ~0, same as it would in the exact
-            full-vocab KL -- matches the formula used by verl's OPD. If True, the teacher
-            *and* student distributions are each independently rescaled to sum to 1 over
-            the shared top-k support before computing the weighted log-ratio, so the
-            result is a proper KL divergence between two K-way categorical distributions
-            (matching HuggingFace TRL's `DistillationTrainer` `loss_top_k` behavior and
-            the renormalization recommended in "Your Teacher Can't Help You Here",
-            arXiv:2605.30833). Renormalizing only the teacher (weights) while leaving
-            student_topk_logprobs as full-vocab values would still let the optimizer lower
-            in-support student probabilities by pushing mass outside the top-k support,
-            since student's normalizer wouldn't see that shift -- both sides need their
-            own renormalization for the exploit the paper describes to actually be closed.
-            Padded slots are excluded from the student normalizer too (via the teacher
-            validity mask): a padded slot's real (repeated id=0) student log-prob would
-            otherwise leak into the student sum, which no equivalent problem exists for
-            unrenormalized weighting since padded teacher weights are already exactly 0.
-
-    Returns:
-        `[R]` tensor of per-token advantages.
-    """
-    teacher_weights = teacher_topk_logprobs.exp()
-    if renormalize:
-        valid = teacher_weights > 0  # exact float32 underflow at padded slots, see above
-        student_weights = torch.where(valid, student_topk_logprobs.exp(), torch.zeros_like(student_topk_logprobs))
-        teacher_norm = teacher_weights.sum(dim=-1, keepdim=True).clamp_min(1e-12)
-        student_norm = student_weights.sum(dim=-1, keepdim=True).clamp_min(1e-12)
-        teacher_topk_logprobs = teacher_topk_logprobs - teacher_norm.log()
-        student_topk_logprobs = student_topk_logprobs - student_norm.log()
-        teacher_weights = teacher_weights / teacher_norm
-    return (teacher_weights * (teacher_topk_logprobs - student_topk_logprobs)).sum(dim=-1)
-
-
 def compute_advantages_and_returns(args: Namespace, rollout_data: RolloutBatch) -> None:
     """Compute advantages and returns in-place based on `args.advantage_estimator`.
 
@@ -523,30 +470,23 @@ def compute_advantages_and_returns(args: Namespace, rollout_data: RolloutBatch) 
         response_lengths = rollout_data.get("response_lengths")
         device = student_log_probs[0].device
 
-        if getattr(args, "opd_loss_type", "sampled_token") == "topk":
-            teacher_topk_logprobs = rollout_data.get("teacher_topk_logprobs")
-            student_topk_log_probs = rollout_data.get("student_topk_log_probs")
-            teacher_topk_logprobs = [t.to(device=device) for t in teacher_topk_logprobs]
-            teacher_topk_logprobs = [
-                t[-response_length:]
-                for t, response_length in zip(teacher_topk_logprobs, response_lengths, strict=True)
-            ]
-            advantages = [
-                _topk_kl_advantage(t_lp, s_lp, renormalize=args.opd_topk_renormalize)
-                for t_lp, s_lp in zip(teacher_topk_logprobs, student_topk_log_probs, strict=True)
-            ]
-        else:
-            teacher_log_probs = rollout_data.get("teacher_log_probs")
-            teacher_log_probs = [t_log_prob.to(device=device) for t_log_prob in teacher_log_probs]
-            # TODO: strict should be True?
-            teacher_log_probs = [
-                t_log_prob[-response_length:]
-                for t_log_prob, response_length in zip(teacher_log_probs, response_lengths, strict=False)
-            ]
-            advantages = [
-                teacher_log_prob - student_log_prob
-                for teacher_log_prob, student_log_prob in zip(teacher_log_probs, student_log_probs, strict=False)
-            ]
+        # only opd_loss_type="sampled_token" is supported here
+        # opd_loss_type="topk" should have been routed to opd_topk_loss_function instead.
+        assert getattr(args, "opd_loss_type", "sampled_token") == "sampled_token", (
+            f"advantage_estimator=on_policy_distillation only supports opd_loss_type="
+            f"'sampled_token' here (got {args.opd_loss_type!r})."
+        )
+        teacher_log_probs = rollout_data.get("teacher_log_probs")
+        teacher_log_probs = [t_log_prob.to(device=device) for t_log_prob in teacher_log_probs]
+        # TODO: strict should be True?
+        teacher_log_probs = [
+            t_log_prob[-response_length:]
+            for t_log_prob, response_length in zip(teacher_log_probs, response_lengths, strict=False)
+        ]
+        advantages = [
+            teacher_log_prob - student_log_prob
+            for teacher_log_prob, student_log_prob in zip(teacher_log_probs, student_log_probs, strict=False)
+        ]
         returns = advantages
 
     else:
@@ -1008,6 +948,143 @@ def sft_loss_function(
     )
 
 
+def _topk_forward_kl(
+    teacher_topk_logprobs: torch.Tensor,
+    student_topk_logprobs: torch.Tensor,
+    renormalize: bool = False,
+) -> torch.Tensor:
+    """Per-token top-k forward-KL(teacher || student), truncated to the teacher's top-k support.
+
+    `sum_v teacher_prob(v) * (teacher_log_prob(v) - student_log_prob(v))`, summed over the
+    teacher's own top-k token ids at each position. Used directly as a loss term by
+    `opd_topk_loss_function` -- `student_topk_logprobs` must carry gradients (computed by
+    `compute_vocab_parallel_topk_log_probs`, which is differentiable w.r.t. the student's
+    logits at all K ids), so minimizing this quantity's mean directly decreases the
+    forward KL, unlike routing it through a PPO-style advantage on a single sampled token.
+
+    Padded slots (see `orbit.ray.teacher._TOPK_PAD_LOGPROB`) carry a teacher log-prob of
+    -1e4, so `teacher_topk_logprobs.exp()` underflows to exactly 0.0 in float32 -- used
+    below as an exact (not approximate) validity mask.
+
+    Args:
+        teacher_topk_logprobs: `[R, K]` teacher log-probs at its own top-k token ids.
+            Treated as a constant (the teacher is frozen); no gradient is needed here.
+        student_topk_logprobs: `[R, K]` student log-probs at those same token ids,
+            differentiable w.r.t. the student's parameters.
+        renormalize: If False (default), `teacher_prob(v)` is used as-is (from the full
+            student/teacher vocab distributions), so the top-k weights sum to less than 1
+            and the dropped tail mass contributes ~0, same as it would in the exact
+            full-vocab KL -- matches the formula used by verl's OPD. If True, the teacher
+            *and* student distributions are each independently rescaled to sum to 1 over
+            the shared top-k support before computing the weighted log-ratio, so the
+            result is a proper KL divergence between two K-way categorical distributions
+            (matching HuggingFace TRL's `DistillationTrainer` `loss_top_k` behavior and
+            the renormalization recommended in "Your Teacher Can't Help You Here",
+            arXiv:2605.30833). Renormalizing only the teacher (weights) while leaving
+            student_topk_logprobs as full-vocab values would still let the optimizer lower
+            in-support student probabilities by pushing mass outside the top-k support,
+            since student's normalizer wouldn't see that shift -- both sides need their
+            own renormalization for the exploit the paper describes to actually be closed.
+            Padded slots are excluded from the student normalizer too (via the teacher
+            validity mask): a padded slot's real (repeated id=0) student log-prob would
+            otherwise leak into the student sum, which no equivalent problem exists for
+            unrenormalized weighting since padded teacher weights are already exactly 0.
+
+    Returns:
+        `[R]` tensor of per-token forward-KL values (>= 0 in the unrenormalized, full-support
+        limit; the loss to minimize).
+    """
+    # Teacher is frozen: its log-probs arrive as plain (non-autograd) tensors from Ray
+    # anyway, but detach explicitly so the intent -- no gradient into the teacher side --
+    # is unambiguous regardless of caller.
+    teacher_weights = teacher_topk_logprobs.exp().detach()
+    teacher_topk_logprobs = teacher_topk_logprobs.detach()
+    if renormalize:
+        valid = teacher_weights > 0  # exact float32 underflow at padded slots, see above
+        # student_weights/student_norm intentionally keep gradients: the student's own
+        # normalizer must see the same renormalization the teacher's did, see docstring.
+        student_weights = torch.where(valid, student_topk_logprobs.exp(), torch.zeros_like(student_topk_logprobs))
+        teacher_norm = teacher_weights.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+        student_norm = student_weights.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+        teacher_topk_logprobs = teacher_topk_logprobs - teacher_norm.log()
+        student_topk_logprobs = student_topk_logprobs - student_norm.log()
+        teacher_weights = teacher_weights / teacher_norm
+    return (teacher_weights * (teacher_topk_logprobs - student_topk_logprobs)).sum(dim=-1)
+
+
+def opd_topk_loss_function(
+    args: Namespace,
+    batch: RolloutBatch,
+    logits: torch.Tensor,
+    sum_of_sample_mean: Callable[[torch.Tensor], torch.Tensor],
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Direct (non-policy-gradient) top-k forward-KL on_policy_distillation loss.
+
+    Unlike `--opd-loss-type sampled_token` (which treats `teacher_log_prob(a_t) -
+    student_log_prob(a_t)` as a REINFORCE advantage on the token the student happened to
+    sample, routed through `compute_policy_loss`'s PPO ratio/clip), this backpropagates
+    directly through the student's log-probs at all `--opd-topk-k` of the teacher's top-k
+    token ids for every response position -- mirroring verl's `forward_kl_topk` (see
+    https://verl.readthedocs.io/en/latest/algo/opd.html, "PG OPD" section), which
+    explicitly requires `use_policy_gradient=false`:
+
+        "a policy-gradient update only acts through the sampled token ... the update
+        cannot directly assign credit to the non-sampled top-k tokens. This discards
+        most of the distributional signal and can produce misleading updates."
+
+    There is no importance-sampling ratio here (and hence no PPO clip, no old/rollout
+    log-probs needed): the loss is computed directly against the current parameters in
+    the same forward pass, so there is no train/rollout policy mismatch to correct for.
+
+    Args:
+        args: Configuration; uses `opd_topk_renormalize`.
+        batch: Mini-batch with "teacher_topk_ids" (list of `[R, K]` token ids per sample),
+            "teacher_topk_logprobs" (list of `[R, K]` teacher log-probs per sample),
+            "unconcat_tokens", "total_lengths", "response_lengths", "loss_masks".
+        logits: Policy logits with shape `[1, T, V]`, from the current (grad-enabled)
+            forward pass.
+        sum_of_sample_mean: Reduction function that averages per-sample values.
+
+    Returns:
+        Tuple of `(loss, metrics)` where `metrics` contains a single detached scalar
+        "loss" (the mean per-token top-k forward KL).
+    """
+    device = logits.device
+    teacher_topk_ids = [t.to(device=device) for t in batch["teacher_topk_ids"]]
+    teacher_topk_logprobs = [t.to(device=device) for t in batch["teacher_topk_logprobs"]]
+
+    log_probs_and_entropy = get_log_probs_and_entropy(
+        logits,
+        args=args,
+        unconcat_tokens=batch["unconcat_tokens"],
+        total_lengths=batch["total_lengths"],
+        response_lengths=batch["response_lengths"],
+        with_entropy=False,
+        max_seq_lens=batch.get("max_seq_lens", None),
+        teacher_topk_ids=teacher_topk_ids,
+    )
+    student_topk_log_probs = log_probs_and_entropy["student_topk_log_probs"]
+
+    topk_kl = [
+        _topk_forward_kl(t_lp, s_lp, renormalize=args.opd_topk_renormalize)
+        for t_lp, s_lp in zip(teacher_topk_logprobs, student_topk_log_probs, strict=True)
+    ]
+    topk_kl = torch.cat(topk_kl, dim=0)
+
+    loss = sum_of_sample_mean(topk_kl)
+
+    # make sure the gradient could backprop correctly.
+    if topk_kl.numel() == 0:
+        loss = loss + 0 * logits.sum()
+
+    return (
+        loss,
+        {
+            "loss": loss.clone().detach(),
+        },
+    )
+
+
 def loss_function(
     args: Namespace,
     batch: RolloutBatch,
@@ -1017,7 +1094,7 @@ def loss_function(
 ) -> tuple[torch.Tensor, int | torch.Tensor, dict[str, list[str] | torch.Tensor]]:
     """Dispatch to the configured loss and rescale for Megatron integration.
 
-    Selects one of "policy_loss", "value_loss", "sft_loss", or a custom loss
+    Selects one of "policy_loss", "value_loss", "sft_loss", "opd_topk_loss", or a custom loss
     function based on `args.loss_type`, computes the loss and metrics, then
     rescales the loss by micro-batch and parallelism factors to integrate with
     Megatron's gradient accumulation.
@@ -1058,6 +1135,8 @@ def loss_function(
             func = value_loss_function
         case "sft_loss":
             func = sft_loss_function
+        case "opd_topk_loss":
+            func = opd_topk_loss_function
         case "custom_loss":
             func = load_function(args.custom_loss_function_path)
         case _:

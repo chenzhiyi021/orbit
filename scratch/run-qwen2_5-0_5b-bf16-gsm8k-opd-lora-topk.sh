@@ -90,11 +90,13 @@ OPD_ARGS=(
     --opd-teacher-num-gpus 1
     --opd-teacher-tp-size 1
     --advantage-estimator on_policy_distillation
-    --loss-type policy_loss
+    # opd-loss-type=topk trains via a direct top-k forward-KL loss (opd_topk_loss_function),
+    # not the PPO policy_loss path -- loss-type must be opd_topk_loss, not policy_loss.
+    --loss-type opd_topk_loss
     --opd_teacher_mem_fraction_static 0.25
-    --opd-loss-type sampled_token
-#     --opd-loss-type topk
-#     --opd-topk-k 8
+#     --opd-loss-type sampled_token
+    --opd-loss-type topk
+    --opd-topk-k 8
 #     --opd-topk-renormalize
 )
 

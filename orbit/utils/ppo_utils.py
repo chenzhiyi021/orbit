@@ -206,68 +206,94 @@ def compute_entropy_from_logits(logits: torch.Tensor, process_group) -> torch.Te
     return _VocabParallelEntropy.apply(logits, process_group)
 
 
+class _DifferentiableAllReduceSum(torch.autograd.Function):
+    """Sum all-reduce across `process_group` that supports backward.
+
+    Plain `torch.distributed.all_reduce` has no autograd support. The adjoint of a
+    sum-reduce is itself a sum-reduce of the incoming gradient: every rank's local
+    tensor contributes with coefficient 1 to the replicated forward output, and (under
+    Megatron tensor parallelism) every rank runs the same downstream computation on
+    that same replicated output, so re-broadcasting the gradient via another sum
+    all-reduce is exactly the correct backward.
+    """
+
+    @staticmethod
+    def forward(ctx, tensor: torch.Tensor, process_group: dist.ProcessGroup) -> torch.Tensor:
+        ctx.process_group = process_group
+        out = tensor.clone()
+        dist.all_reduce(out, op=dist.ReduceOp.SUM, group=process_group)
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor, None]:
+        grad_input = grad_output.clone()
+        dist.all_reduce(grad_input, op=dist.ReduceOp.SUM, group=ctx.process_group)
+        return grad_input, None
+
+
 def compute_vocab_parallel_topk_log_probs(
     logits: torch.Tensor, topk_ids: torch.Tensor, process_group: dist.ProcessGroup
 ) -> torch.Tensor:
-    """Gather log-probs at externally supplied token ids from vocab-parallel logits.
+    """Gather (differentiable) log-probs at externally supplied token ids from vocab-parallel logits.
 
-    Used by on_policy_distillation's "topk" advantage estimator to score the
-    student at the teacher's top-k token ids. Deliberately avoids Megatron's
-    `fused_vocab_parallel_cross_entropy` (which is wrapped in `@jit_fuser` /
-    torch.compile): that kernel recompiles and re-autotunes per new input shape,
-    and calling it many times in a tight loop from inside a pipeline-parallel
-    `forward_step` (once per top-k slot) has been observed to crash with
-    "CUDA driver error: invalid argument" during Triton autotuning. This
-    implementation uses only plain eager ops (mirrors the masked-gather +
-    all-reduce pattern Megatron's own vocab-parallel cross-entropy uses
-    internally, and the log-sum-exp all-reduce pattern already used by
-    `_VocabParallelEntropy` above), and computes the log-normalizer once and
-    reuses it for every id instead of recomputing it per call.
+    Used by on_policy_distillation's "topk" loss (`opd_topk_loss_function`) to score the
+    student -- with gradients -- at the teacher's top-k token ids for every position, not
+    just whichever token the student happened to sample. Deliberately avoids Megatron's
+    `fused_vocab_parallel_cross_entropy` (which is wrapped in `@jit_fuser` / torch.compile):
+    that kernel recompiles and re-autotunes per new input shape, and calling it once per
+    top-k slot in a loop from inside a pipeline-parallel `forward_step` has been observed
+    to crash with "CUDA driver error: invalid argument" during Triton autotuning. This
+    implementation instead does a single vectorized gather over all K ids at once using
+    plain eager ops (mirrors the masked-gather + all-reduce pattern Megatron's own
+    vocab-parallel cross-entropy uses internally, and the log-sum-exp all-reduce pattern
+    already used by `_VocabParallelEntropy` above), computing the log-normalizer once and
+    reusing it for every id.
 
-    No gradients are needed here (this only feeds a REINFORCE-style advantage,
-    computed in a forward_only/no_grad context), so this intentionally does not
-    support backward.
+    Differentiable w.r.t. `logits`. The max used to shift logits for a numerically stable
+    log-sum-exp is detached: log-sum-exp's gradient (softmax) is exactly the same
+    regardless of which constant shift was used, so detaching the shift only avoids
+    differentiating through an arbitrary arg-max tie-break -- it does not change the
+    gradient. The sum-of-exp and per-id gather all-reduces use `_DifferentiableAllReduceSum`
+    so gradients correctly flow back to whichever TP rank actually owns each vocab id.
 
     Args:
-        logits: `[R, V_local]` vocab-parallel logits (this rank's shard).
+        logits: `[R, V_local]` vocab-parallel logits (this rank's shard). Requires grad.
         topk_ids: `[R, K]` global (unsharded) token ids to gather log-probs for.
         process_group: Tensor-parallel process group.
 
     Returns:
-        `[R, K]` log-probs.
+        `[R, K]` log-probs, differentiable w.r.t. `logits`.
     """
     k = topk_ids.size(-1)
     if logits.size(0) == 0:
         return logits.new_zeros((0, k))
 
-    with torch.no_grad():
-        # teacher_topk_ids arrives from TeacherManager via Ray (CPU tensor); logits is
-        # the direct output of the student's own forward pass (GPU). Move to match
-        # before indexing -- torch.gather requires index and input on the same device.
-        topk_ids = topk_ids.to(device=logits.device)
-        logits = logits.float()
-        tp_rank = dist.get_rank(group=process_group)
-        partition_vocab_size = logits.size(-1)
-        vocab_start_index = tp_rank * partition_vocab_size
-        vocab_end_index = vocab_start_index + partition_vocab_size
+    # teacher_topk_ids arrives from TeacherManager via Ray (CPU tensor); logits is
+    # the direct output of the student's own forward pass (GPU). Move to match
+    # before indexing -- torch.gather requires index and input on the same device.
+    topk_ids = topk_ids.to(device=logits.device)
+    logits = logits.float()
+    tp_rank = dist.get_rank(group=process_group)
+    partition_vocab_size = logits.size(-1)
+    vocab_start_index = tp_rank * partition_vocab_size
+    vocab_end_index = vocab_start_index + partition_vocab_size
 
+    with torch.no_grad():
         logits_max = logits.max(dim=-1, keepdim=True).values
         dist.all_reduce(logits_max, op=dist.ReduceOp.MAX, group=process_group)
-        sum_exp_logits = (logits - logits_max).exp().sum(dim=-1, keepdim=True)
-        dist.all_reduce(sum_exp_logits, group=process_group)
-        log_normalizer = logits_max.squeeze(-1) + sum_exp_logits.squeeze(-1).log()  # [R]
 
-        log_probs = []
-        for k_idx in range(k):
-            ids = topk_ids[:, k_idx]
-            local_ids = (ids - vocab_start_index).clamp(0, partition_vocab_size - 1)
-            owned_mask = (ids >= vocab_start_index) & (ids < vocab_end_index)
-            gathered_logit = torch.gather(logits, dim=-1, index=local_ids.unsqueeze(-1)).squeeze(-1)
-            gathered_logit = torch.where(owned_mask, gathered_logit, torch.zeros_like(gathered_logit))
-            dist.all_reduce(gathered_logit, group=process_group)
-            log_probs.append(gathered_logit - log_normalizer)
+    exp_logits = (logits - logits_max).exp()
+    sum_exp_logits_local = exp_logits.sum(dim=-1, keepdim=True)
+    sum_exp_logits = _DifferentiableAllReduceSum.apply(sum_exp_logits_local, process_group)
+    log_normalizer = logits_max.squeeze(-1) + sum_exp_logits.squeeze(-1).log()  # [R]
 
-        return torch.stack(log_probs, dim=-1)
+    local_ids = (topk_ids - vocab_start_index).clamp(0, partition_vocab_size - 1)
+    owned_mask = (topk_ids >= vocab_start_index) & (topk_ids < vocab_end_index)
+    gathered_logit = torch.gather(logits, dim=-1, index=local_ids)  # [R, K]
+    gathered_logit = torch.where(owned_mask, gathered_logit, torch.zeros_like(gathered_logit))
+    gathered_logit = _DifferentiableAllReduceSum.apply(gathered_logit, process_group)
+
+    return gathered_logit - log_normalizer.unsqueeze(-1)
 
 
 def get_grpo_returns(

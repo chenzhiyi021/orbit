@@ -428,6 +428,12 @@ def train_one_step(
                 # TODO: find a better way to add this to the batch.
                 # NOTE: would this affect RL?
                 "teacher_log_probs",
+                # Only present for on_policy_distillation's opd_loss_type="topk", which
+                # (unlike opd_loss_type="sampled_token") needs these in the *training*
+                # forward_step -- opd_topk_loss_function computes its loss directly
+                # against the current (grad-enabled) forward, not a precomputed advantage.
+                "teacher_topk_ids",
+                "teacher_topk_logprobs",
                 "max_seq_lens",
             ],
             args.data_pad_size_multiplier,

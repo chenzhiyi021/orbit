@@ -1077,10 +1077,12 @@ def get_orbit_extra_args_provider(add_custom_arguments=None):
             parser.add_argument(
                 "--loss-type",
                 type=str,
-                choices=["policy_loss", "sft_loss", "custom_loss"],
+                choices=["policy_loss", "sft_loss", "opd_topk_loss", "custom_loss"],
                 default="policy_loss",
                 help=(
-                    "Choose loss type, currently support ppo policy_loss or sft_loss, "
+                    "Choose loss type, currently support ppo policy_loss, sft_loss, or "
+                    "opd_topk_loss (direct, non-policy-gradient top-k forward-KL loss for "
+                    "--opd-loss-type topk; see opd_topk_loss_function docstring), "
                     "if custom_loss is set, we will use the function path from `--custom-loss-function-path`."
                 ),
             )
@@ -1770,12 +1772,18 @@ def get_orbit_extra_args_provider(add_custom_arguments=None):
                 choices=["sampled_token", "topk"],
                 default="sampled_token",
                 help=(
-                    "How to estimate the teacher/student advantage for "
-                    "--advantage-estimator on_policy_distillation. 'sampled_token': "
-                    "single-sample estimate using only the token the student actually "
-                    "sampled (teacher_log_prob - student_log_prob). 'topk': multi-token "
-                    "estimate that sums teacher_prob * (teacher_log_prob - student_log_prob) "
-                    "over the teacher's top-k token distribution at each position."
+                    "Which on_policy_distillation training path to use. 'sampled_token': "
+                    "REINFORCE-style advantage using only the token the student actually "
+                    "sampled (teacher_log_prob - student_log_prob), trained with "
+                    "--loss-type policy_loss through the usual PPO ratio/advantage "
+                    "machinery. 'topk': direct, non-policy-gradient top-k forward-KL loss "
+                    "that backprops through the student's log-probs at all --opd-topk-k of "
+                    "the teacher's top-k token ids per position (sum teacher_prob * "
+                    "(teacher_log_prob - student_log_prob)); requires --loss-type "
+                    "opd_topk_loss. Mirrors verl's forward_kl_topk, which likewise must "
+                    "not be combined with a policy-gradient update -- a PG update can only "
+                    "assign credit to the sampled token, discarding the rest of the top-k "
+                    "distributional signal (see https://verl.readthedocs.io/en/latest/algo/opd.html)."
                 ),
             )
             parser.add_argument(
@@ -2366,13 +2374,24 @@ def orbit_validate_args(args):
         assert args.advantage_estimator == "on_policy_distillation", (
             "--opd-loss-type topk only applies to --advantage-estimator on_policy_distillation."
         )
+        # topk trains via a direct (non-policy-gradient) loss -- it bypasses PPO/advantage
+        # computation entirely (see opd_topk_loss_function), so it needs its own loss_type
+        # rather than reusing policy_loss's ratio/clip machinery.
+        assert args.loss_type == "opd_topk_loss", (
+            "--opd-loss-type topk trains via a direct top-k forward-KL loss, not the PPO "
+            "policy_loss path -- set --loss-type opd_topk_loss."
+        )
         assert args.opd_topk_k > 0, "--opd-topk-k must be positive when --opd-loss-type=topk."
         assert not args.allgather_cp, (
             "--opd-loss-type topk does not support --allgather-cp yet: the CP redistribution "
             "helper only handles 1D per-token tensors, not the [R, K] top-k tensors."
         )
-    elif args.opd_topk_renormalize:
-        raise ValueError("--opd-topk-renormalize only applies when --opd-loss-type=topk.")
+    else:
+        if args.opd_topk_renormalize:
+            raise ValueError("--opd-topk-renormalize only applies when --opd-loss-type=topk.")
+        assert args.loss_type != "opd_topk_loss", (
+            "--loss-type opd_topk_loss requires --opd-loss-type topk."
+        )
 
     if args.use_rollout_logprobs:
         assert not args.use_tis, "use_rollout_logprobs and use_tis cannot be set at the same time."

@@ -512,7 +512,15 @@ class MegatronTrainRayActor(TrainRayActor):
         data_iterator, num_microbatches = get_data_iterator(self.args, self.model, rollout_data)
 
         with inverse_timer("train_wait"), timer("train"):
-            if self.args.compute_advantages_and_returns:
+            if getattr(self.args, "opd_loss_type", "sampled_token") == "topk":
+                # opd_topk_loss_function is a direct loss computed against the current
+                # parameters in the same (single) forward pass used for training, so
+                # there's no PPO ratio and no "old"/rollout log-probs to precompute, and
+                # no advantage to derive -- skip the no-grad old-log-prob pass and
+                # compute_advantages_and_returns entirely (unlike opd_loss_type=
+                # "sampled_token", which still needs both for its PPO-style update).
+                pass
+            elif self.args.compute_advantages_and_returns:
                 if self._active_model_tag != "actor":
                     self._switch_model("actor")
                 rollout_data.update(
