@@ -77,7 +77,7 @@ ROLLOUT_ARGS=(
 
 OPTIMIZER_ARGS=(
     --optimizer adam
-    --lr 5e-7
+    --lr 3e-6
     --lr-decay-style constant
     --weight-decay 0.01
     --adam-beta1 0.9
@@ -97,7 +97,7 @@ OPD_ARGS=(
 #     --opd-loss-type sampled_token
     --opd-loss-type topk
     --opd-topk-k 8
-#     --opd-topk-renormalize
+    --opd-topk-renormalize
 )
 
 LOSS_ARGS=(
