@@ -9,7 +9,7 @@ source "${ORBIT_ROOT}/scripts/lib/tool_env.sh"
 source "${ORBIT_ROOT}/scripts/lib/common.sh"
 
 # === Recipe identity ===
-LAUNCHER_NAME=run_qwen25_05b_bf16_gsm8k_megatron_opd_lora
+LAUNCHER_NAME=run_qwen25_05b_bf16_gsm8k_megatron_opd_lora_topk
 WANDB_PROJECT=${WANDB_PROJECT:-orbit-release}
 WANDB_GROUP=${WANDB_GROUP:-${LAUNCHER_NAME}}
 PRECISION_PROFILE=bf16
