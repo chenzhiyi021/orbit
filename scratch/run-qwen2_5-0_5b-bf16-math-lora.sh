@@ -65,7 +65,7 @@ ROLLOUT_ARGS=(
     --prompt-data "${TRAIN_JSONL}"
     --input-key question
     --label-key answer
-    # --apply-chat-template
+    --apply-chat-template
     --rollout-shuffle
     --rm-type math
     --num-rollout "${NUM_ROLLOUT}"

@@ -35,11 +35,10 @@ RAY_NUM_CPUS=32
 source "${ORBIT_ROOT}/orbit_plugins/model_args/qwen2.5-0.5B.sh"   # provides MODEL_ARGS=(...)
 
 # === Training schedule ===
-TOTAL_EPOCHS="${TOTAL_EPOCHS:-40}"
+TOTAL_EPOCHS="${TOTAL_EPOCHS:-15}"
 ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-128}"
 N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-4}"
 GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-64}"
-# `wc -l` undercounts .parquet files (binary) -- count rows with pyarrow instead.
 count_rows() {
     case "$1" in
         *.parquet) python3 -c "import pyarrow.parquet as pq; print(pq.ParquetFile('$1').metadata.num_rows)" ;;
@@ -67,7 +66,7 @@ ROLLOUT_ARGS=(
     --prompt-data "${TRAIN_JSONL}"
     --input-key question
     --label-key answer
-    # --apply-chat-template
+    --apply-chat-template
     --rollout-shuffle
     --rm-type math
     --num-rollout "${NUM_ROLLOUT}"

@@ -44,7 +44,6 @@ TOTAL_EPOCHS="${TOTAL_EPOCHS:-20}"
 ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-32}"
 N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-4}"
 GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-64}"
-# `wc -l` undercounts .parquet files (binary) -- count rows with pyarrow instead.
 count_rows() {
     case "$1" in
         *.parquet) python3 -c "import pyarrow.parquet as pq; print(pq.ParquetFile('$1').metadata.num_rows)" ;;
@@ -71,7 +70,7 @@ ROLLOUT_ARGS=(
     --prompt-data "${TRAIN_JSONL}"
     --input-key question
     --label-key answer
-    # --apply-chat-template
+    --apply-chat-template
     --rollout-shuffle
     --rm-type math
     --num-rollout "${NUM_ROLLOUT}"
