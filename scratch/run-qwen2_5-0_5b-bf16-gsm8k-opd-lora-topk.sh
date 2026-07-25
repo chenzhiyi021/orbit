@@ -102,6 +102,12 @@ OPD_ARGS=(
 
 LOSS_ARGS=(
     --calculate-per-token-loss
+    # opd_topk_loss_function's differentiable top-k gather (compute_vocab_parallel_topk_log_probs)
+    # is plain eager ops, not a fused/memory-efficient kernel like fused_vocab_parallel_cross_entropy
+    # -- it needs a full [R, V] intermediate (exp_logits) for backward on top of what the
+    # sampled-token log-prob path already retains. Recomputing the loss function during backward
+    # (instead of keeping that intermediate alive from forward to backward) avoids the added OOM risk.
+    --recompute-loss-function
 )
 
 WANDB_ARGS=(
