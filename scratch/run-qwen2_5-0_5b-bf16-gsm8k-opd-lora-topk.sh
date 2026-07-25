@@ -29,7 +29,7 @@ TEST_JSONL="/mnt/L202500431/datasets/gsm8k/main/test-00000-of-00001.parquet"
 
 # Teacher checkpoint -- MUST be same-family (same tokenizer/vocab) as the
 # student checkpoint above.
-OPD_TEACHER_CKPT="/mnt/L202500431/orbit/orbit_ckpts/Qwen2.5-0.5B-Instruct_math_full_rlvr_20260725_230112/iter_0000875/merged/"
+OPD_TEACHER_CKPT="/mnt/L202500431/orbit/orbit_ckpts/Qwen2.5-0.5B-Instruct_math_full_rlvr_20260725_230112/merged/"
 # : "${OPD_TEACHER_CKPT:?set OPD_TEACHER_CKPT to a Hugging Face checkpoint path}"
 
 # === Resources ===
