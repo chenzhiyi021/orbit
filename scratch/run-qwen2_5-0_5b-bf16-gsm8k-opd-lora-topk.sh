@@ -124,7 +124,12 @@ PERF_ARGS=(
     --expert-model-parallel-size 1
     --expert-tensor-parallel-size 1
     --use-dynamic-batch-size
-    --max-tokens-per-gpu 8192
+    # opd_topk_loss_function's differentiable top-k gather needs a [R, V] fp32
+    # intermediate (R tokens x full vocab) for backward; halved from 8192 to keep
+    # that single allocation (~2.3 GiB at this vocab size, was ~4.6 GiB) inside the
+    # free memory this single-GPU colocated (teacher+rollout+student, no offload)
+    # setup actually has -- see OOM at --max-tokens-per-gpu=8192.
+    --max-tokens-per-gpu 4096
     --recompute-granularity full
     --recompute-method uniform
     --recompute-num-layers 1
