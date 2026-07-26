@@ -21,15 +21,14 @@ HF_CKPT="/mnt/L202500431/models/qwen2.5-0.5b-instruct"
 # : "${HF_CKPT:?set HF_CKPT to a Hugging Face checkpoint path}"
 MEGATRON_LOAD="/mnt/L202500431/models/megatron_ckpt/qwen2.5-0.5b-instruct"
 # : "${MEGATRON_LOAD:?set MEGATRON_LOAD to a Megatron torch_dist checkpoint path}"
-SAVE_DIR="${ORBIT_ROOT}/orbit_ckpts/Qwen2.5-0.5B-Instruct_gsm8k_opd"
+SAVE_DIR="${ORBIT_ROOT}/orbit_ckpts/Qwen2.5-0.5B-Instruct_gsm8k_opd_lora_topk_$(date +%Y%m%d_%H%M%S)"
 TRAIN_JSONL="/mnt/L202500431/datasets/gsm8k/main/train-00000-of-00001.parquet"
 # : "${TRAIN_JSONL:?set TRAIN_JSONL to a training jsonl path}"
 TEST_JSONL="/mnt/L202500431/datasets/gsm8k/main/test-00000-of-00001.parquet"
 # TEST_JSONL=${TEST_JSONL:-}
 
-# Teacher checkpoint -- MUST be same-family (same tokenizer/vocab) as the
-# student checkpoint above.
-OPD_TEACHER_CKPT="/mnt/L202500431/orbit/orbit_ckpts/Qwen2.5-0.5B-Instruct_math_full_rlvr_20260725_230112/merged/"
+# Teacher checkpoint -- 0.5B RLVR-trained (same family/tokenizer as student).
+OPD_TEACHER_CKPT="/mnt/L202500431/orbit/orbit_ckpts/Qwen2.5-0.5B-Instruct_math_full_rlvr_20260725_230112/iter_0000875/merged"
 # : "${OPD_TEACHER_CKPT:?set OPD_TEACHER_CKPT to a Hugging Face checkpoint path}"
 
 # === Resources ===
@@ -44,7 +43,13 @@ TOTAL_EPOCHS="${TOTAL_EPOCHS:-15}"
 ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-32}"
 N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-2}"
 GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-64}"
-TRAIN_ROWS=${TRAIN_ROWS:-$(wc -l < "${TRAIN_JSONL}")}
+count_rows() {
+    case "$1" in
+        *.parquet) python3 -c "import pyarrow.parquet as pq; print(pq.ParquetFile('$1').metadata.num_rows)" ;;
+        *) wc -l < "$1" ;;
+    esac
+}
+TRAIN_ROWS=${TRAIN_ROWS:-$(count_rows "${TRAIN_JSONL}")}
 NUM_ROLLOUT=${NUM_ROLLOUT:-$(( (TRAIN_ROWS * TOTAL_EPOCHS + ROLLOUT_BATCH_SIZE - 1) / ROLLOUT_BATCH_SIZE ))}
 
 # === ARGS arrays ===
