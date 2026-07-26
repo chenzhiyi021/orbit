@@ -21,27 +21,26 @@ HF_CKPT="/mnt/L202500431/models/qwen2.5-0.5b-instruct"
 # : "${HF_CKPT:?set HF_CKPT to a Hugging Face checkpoint path}"
 MEGATRON_LOAD="/mnt/L202500431/models/megatron_ckpt/qwen2.5-0.5b-instruct"
 # : "${MEGATRON_LOAD:?set MEGATRON_LOAD to a Megatron torch_dist checkpoint path}"
-SAVE_DIR="${ORBIT_ROOT}/orbit_ckpts/Qwen2.5-0.5B-Instruct_gsm8k_opd_oft"
+SAVE_DIR="${ORBIT_ROOT}/orbit_ckpts/Qwen2.5-0.5B-Instruct_gsm8k_opd_oft_$(date +%Y%m%d_%H%M%S)"
 TRAIN_JSONL="/mnt/L202500431/datasets/gsm8k/main/train-00000-of-00001.parquet"
 # : "${TRAIN_JSONL:?set TRAIN_JSONL to a training jsonl path}"
 TEST_JSONL="/mnt/L202500431/datasets/gsm8k/main/test-00000-of-00001.parquet"
 # TEST_JSONL=${TEST_JSONL:-}
 
-# Teacher checkpoint -- MUST be same-family (same tokenizer/vocab) as the
-# student checkpoint above.
-OPD_TEACHER_CKPT="/mnt/L202500431/models/qwen2.5-1.5b-instruct"
+# Teacher checkpoint -- 0.5B RLVR-trained (same family/tokenizer as student).
+OPD_TEACHER_CKPT="/mnt/L202500431/orbit/orbit_ckpts/Qwen2.5-0.5B-Instruct_math_full_rlvr_20260725_230112/iter_0000875/merged"
 # : "${OPD_TEACHER_CKPT:?set OPD_TEACHER_CKPT to a Hugging Face checkpoint path}"
 
 # === Resources ===
-GPUS_PER_NODE=1
+GPUS_PER_NODE=2
 RAY_NUM_CPUS=128
 
 # === Model args ===
 source "${ORBIT_ROOT}/orbit_plugins/model_args/qwen2.5-0.5B.sh"   # provides MODEL_ARGS=(...)
 
 # === Training schedule ===
-TOTAL_EPOCHS="${TOTAL_EPOCHS:-20}"
-ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-32}"
+TOTAL_EPOCHS="${TOTAL_EPOCHS:-15}"
+ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-128}"
 N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-4}"
 GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-64}"
 count_rows() {
@@ -54,7 +53,13 @@ TRAIN_ROWS=${TRAIN_ROWS:-$(count_rows "${TRAIN_JSONL}")}
 NUM_ROLLOUT=${NUM_ROLLOUT:-$(( (TRAIN_ROWS * TOTAL_EPOCHS + ROLLOUT_BATCH_SIZE - 1) / ROLLOUT_BATCH_SIZE ))}
 
 # === ARGS arrays ===
-COLOCATE_ARGS=( --debug-colocate )
+# 2-GPU colocate: actor+rollout share GPU 0, teacher gets its own dedicated
+# bundle (GPU 1). driver.sh passes --actor-num-gpus-per-node ${GPUS_PER_NODE}
+# (=2 here), so we override to 1 to avoid consuming both GPUs for the actor.
+COLOCATE_ARGS=(
+    --colocate
+    --actor-num-gpus-per-node 1
+)
 
 CKPT_ARGS=(
     --hf-checkpoint "${HF_CKPT}"
@@ -97,7 +102,7 @@ OPD_ARGS=(
     --opd-teacher-tp-size 1
     --advantage-estimator on_policy_distillation
     --loss-type policy_loss
-    --opd_teacher_mem_fraction_static 0.25
+    --opd_teacher_mem_fraction_static 0.7
     --opd-loss-type sampled_token
 )
 
@@ -137,7 +142,7 @@ EVAL_ARGS=(
 
 SGLANG_ARGS=(
     --rollout-num-gpus-per-engine 1
-    --sglang-mem-fraction-static 0.3
+    --sglang-mem-fraction-static 0.60
     --rollout-num-gpus 1
     --sglang-max-running-requests 1024
     --router-disable-circuit-breaker
@@ -151,7 +156,7 @@ MISC_ARGS=(
     --attention-softmax-in-fp32
     --no-offload-train
     --no-offload-train-async
-    --no-offload-rollout 
+    --offload-rollout
     --cuda-graph-impl local
     --cuda-graph-scope full_iteration
     --te-rng-tracker

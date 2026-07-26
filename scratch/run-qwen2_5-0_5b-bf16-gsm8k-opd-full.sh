@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
-# Qwen2.5-0.5B-Instruct BF16 On-Policy Distillation (OPD) on the math dataset.
+# Qwen2.5-0.5B-Instruct BF16 On-Policy Distillation (OPD), full-parameter, on the math dataset.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-# ORBIT_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 ORBIT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 source "${ORBIT_ROOT}/scripts/lib/tool_env.sh"
 source "${ORBIT_ROOT}/scripts/lib/common.sh"
 
 # === Recipe identity ===
-LAUNCHER_NAME=run_qwen25_05b_bf16_gsm8k_megatron_opd_lora
+LAUNCHER_NAME=run_qwen25_05b_bf16_gsm8k_megatron_opd_full
 WANDB_PROJECT=${WANDB_PROJECT:-orbit-release}
 WANDB_GROUP=${WANDB_GROUP:-${LAUNCHER_NAME}}
 PRECISION_PROFILE=bf16
@@ -21,7 +20,7 @@ HF_CKPT="/mnt/L202500431/models/qwen2.5-0.5b-instruct"
 # : "${HF_CKPT:?set HF_CKPT to a Hugging Face checkpoint path}"
 MEGATRON_LOAD="/mnt/L202500431/models/megatron_ckpt/qwen2.5-0.5b-instruct"
 # : "${MEGATRON_LOAD:?set MEGATRON_LOAD to a Megatron torch_dist checkpoint path}"
-SAVE_DIR="${ORBIT_ROOT}/orbit_ckpts/Qwen2.5-0.5B-Instruct_gsm8k_opd_lora_$(date +%Y%m%d_%H%M%S)"
+SAVE_DIR="${ORBIT_ROOT}/orbit_ckpts/Qwen2.5-0.5B-Instruct_gsm8k_opd_full_$(date +%Y%m%d_%H%M%S)"
 TRAIN_JSONL="/mnt/L202500431/datasets/gsm8k/main/train-00000-of-00001.parquet"
 # : "${TRAIN_JSONL:?set TRAIN_JSONL to a training jsonl path}"
 TEST_JSONL="/mnt/L202500431/datasets/gsm8k/main/test-00000-of-00001.parquet"
@@ -43,7 +42,6 @@ TOTAL_EPOCHS="${TOTAL_EPOCHS:-15}"
 ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-128}"
 N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-4}"
 GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-64}"
-# `wc -l` undercounts .parquet files (binary) -- count rows with pyarrow instead.
 count_rows() {
     case "$1" in
         *.parquet) python3 -c "import pyarrow.parquet as pq; print(pq.ParquetFile('$1').metadata.num_rows)" ;;
@@ -89,7 +87,7 @@ ROLLOUT_ARGS=(
 
 OPTIMIZER_ARGS=(
     --optimizer adam
-    --lr 3e-6
+    --lr 1e-6
     --lr-decay-style constant
     --weight-decay 0.01
     --adam-beta1 0.9
@@ -169,12 +167,7 @@ DEBUG_ARGS=(
 )
 
 PEFT_ARGS=(
-    --peft-method lora
-    --peft-variant standard
-    --lora-rank 32
-    --lora-alpha 64
-    --lora-dropout 0.0
-    --target-modules all-linear
+    --peft-method none
 )
 
 source "${ORBIT_ROOT}/scripts/lib/launcher.sh"
