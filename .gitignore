@@ -201,3 +201,5 @@ logs/
 eval_results/
 eval_subsets/
 run_*.pid
+
+examples/peft_arena/backend/third_party/math_eval/data
