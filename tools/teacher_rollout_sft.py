@@ -16,9 +16,9 @@ checkpoint and tear it down when generation finishes:
     python tools/teacher_rollout_sft.py \
     --dataset /mnt/L202500431/datasets/openreasoning_mixed_100k \
     --split train \
-    --teacher-model-path /path/to/hf/teacher-checkpoint \
+    --teacher-model-path /mnt/L202500431/models/qwen3-4b-instruct-2507 \
     --teacher-model my-teacher-model \
-    --teacher-tp-size 4 \
+    --teacher-tp-size 2 \
     --output data/sft/openreasoning_mixed_100k/train.jsonl \
     --concurrency 32
 
