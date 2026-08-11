@@ -51,14 +51,27 @@ RUN_LOG="${ORBIT_ROOT}/logs/${LAUNCHER_NAME}_$(date +%Y%m%d_%H%M%S).log"
 #   export MEGATRON_LOAD=/mnt/L202500431/models/megatron_ckpt/qwen3-1.7b   # NOT YET CONVERTED -- see note below
 # Teacher (frozen, served via SGLang, never converted to Megatron):
 #   export OPD_TEACHER_CKPT=/mnt/L202500431/models/qwen3-4b-instruct-2507
+# Train data: YangyiH/openreasoning_mixed_100k's raw train.parquet -- columns are
+# `messages` (one user-turn dict) + source metadata, NO answer/label column at all
+# (confirmed against a real row: 'domain': 'science', no ground truth). ROLLOUT_ARGS
+# below is wired for this messages-only, no-label schema (--input-key messages, no
+# --label-key).
+#   export TRAIN_JSONL=/mnt/L202500431/datasets/openreasoning_mixed_100k/train.parquet
 : "${HF_CKPT:?set HF_CKPT to the Qwen3-1.7B Hugging Face checkpoint}"
 : "${MEGATRON_LOAD:?set MEGATRON_LOAD to the Qwen3-1.7B Megatron torch_dist checkpoint}"
 : "${OPD_TEACHER_CKPT:?set OPD_TEACHER_CKPT to the frozen Qwen3-4B Hugging Face checkpoint}"
-: "${TRAIN_JSONL:?set TRAIN_JSONL to the OpenReasoning training data (.jsonl or .parquet, question/answer schema)}"
+: "${TRAIN_JSONL:?set TRAIN_JSONL to the OpenReasoning training data (.jsonl or .parquet, messages-only schema)}"
 SAVE_DIR="${SAVE_DIR:-${ORBIT_ROOT}/orbit_ckpts/Qwen3-1.7B_4B_openreasoning_full_vocab_opd_fullft_rkl}"
 AIME24_PATH="${AIME24_PATH:-${ORBIT_ROOT}/data/aime24/test.parquet}"
 AIME25_PATH="${AIME25_PATH:-${ORBIT_ROOT}/data/aime25/test.parquet}"
 HMMT25_PATH="${HMMT25_PATH:-${ORBIT_ROOT}/data/hmmt25/test.parquet}"
+# These AIME/HMMT eval files don't exist in this environment yet, and --input-key/
+# --label-key are global args shared with training's messages-only, no-label
+# schema above -- even if the files existed, eval loading would break unless they
+# also carry a `messages` column with no separate answer column. Eval is off by
+# default until you prepare matching eval data (see tools/convert_math_eval_to_orbit.py)
+# or wire per-dataset keys via --eval-config; set DISABLE_EVAL=0 to re-enable once ready.
+DISABLE_EVAL="${DISABLE_EVAL:-1}"
 
 # === Resources ===
 # Matches the source's two-GPU colocated topology: actor training, student rollout
@@ -93,11 +106,19 @@ CKPT_ARGS=(
 
 ROLLOUT_ARGS=(
     --prompt-data "${TRAIN_JSONL}"
-    --input-key question
-    --label-key answer
+    --input-key messages
     --apply-chat-template
     --apply-chat-template-kwargs '{"enable_thinking": false}'
     --rollout-shuffle
+    # No --label-key: the training parquet has no ground-truth column. --rm-type
+    # math is still required (not optional) even though there's nothing to grade
+    # against -- reward_func (orbit/rollout/opd_sglang.py) unconditionally calls
+    # default_async_rm for full_vocab-mode training samples to populate a
+    # diagnostic reward metric, and default_async_rm raises NotImplementedError if
+    # args.rm_type is unset. With sample.label=None, grade_answer_verl short-
+    # circuits on `if not ground_truth: return False`, so this reward is always 0
+    # -- harmless, but not a real accuracy signal (the actual training signal is
+    # the full-vocab JSD loss, not this reward).
     --rm-type math
     --num-rollout "${NUM_ROLLOUT}"
     --rollout-batch-size "${ROLLOUT_BATCH_SIZE}"
