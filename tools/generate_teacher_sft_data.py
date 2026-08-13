@@ -13,7 +13,9 @@ Qwen3's thinking/non-thinking toggle) are rendered locally via the tokenizer.
     --concurrency 256
 
 Re-running with the same ``--output`` skips prompts already written (matched by
-``prompt_sha256``), so an interrupted run can be resumed by rerunning the same command.
+sequence ``index``, not prompt content -- the source dataset has ~25% duplicate
+prompt text, so a content hash would misalign resumed runs), so an interrupted
+run can be resumed by rerunning the same command.
 """
 
 from __future__ import annotations
@@ -124,10 +126,19 @@ def _load_rows(dataset: str, split: str, *, streaming: bool, cache_dir: str | No
     return load_dataset(dataset, **kwargs)
 
 
-def _load_existing_hashes(output_path: Path) -> set[str]:
+def _load_done_indices(output_path: Path) -> set[int]:
+    """Identify already-written rows by their sequence ``index``, not prompt content.
+
+    The source dataset intentionally keeps ~25% duplicate prompt text (see
+    YangyiH/openreasoning_mixed_100k's card), so a content-hash key would treat a
+    duplicate prompt at a later position as "already done" the moment any earlier
+    occurrence is written -- silently dropping that row and breaking row-for-row
+    alignment with the frozen prompt schedule. Keying resume off position instead
+    of content sidesteps that entirely.
+    """
     if not output_path.exists():
         return set()
-    hashes: set[str] = set()
+    indices: set[int] = set()
     with output_path.open("r", encoding="utf-8") as fin:
         for line in fin:
             line = line.strip()
@@ -137,18 +148,19 @@ def _load_existing_hashes(output_path: Path) -> set[str]:
                 record = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            prompt_sha256 = record.get("metadata", {}).get("prompt_sha256")
-            if prompt_sha256:
-                hashes.add(prompt_sha256)
-    return hashes
+            index = record.get("metadata", {}).get("index")
+            if isinstance(index, int):
+                indices.add(index)
+    return indices
 
 
-def _reuse_records(reuse_from: Path, output_path: Path, done_hashes: set[str]) -> int:
+def _reuse_records(reuse_from: Path, output_path: Path, done_indices: set[int]) -> int:
     """Copy records from an earlier run's output into ``output_path``, skipping ones already there.
 
     Mirrors the reference bank-builder's ``--reuse-bank``: rows already generated in a prior
     (possibly differently-scoped) run are reused verbatim instead of re-calling the teacher.
-    Mutates ``done_hashes`` in place so the caller's generation queue also skips them.
+    Matched by sequence ``index`` (see ``_load_done_indices``), not prompt content. Mutates
+    ``done_indices`` in place so the caller's generation queue also skips them.
     """
     if not reuse_from.exists():
         raise FileNotFoundError(f"--reuse-from path does not exist: {reuse_from}")
@@ -162,16 +174,16 @@ def _reuse_records(reuse_from: Path, output_path: Path, done_hashes: set[str]) -
                 record = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            prompt_sha256 = record.get("metadata", {}).get("prompt_sha256")
-            if not prompt_sha256 or prompt_sha256 in done_hashes:
+            index = record.get("metadata", {}).get("index")
+            if not isinstance(index, int) or index in done_indices:
                 continue
             fout.write(json.dumps(record, ensure_ascii=False) + "\n")
-            done_hashes.add(prompt_sha256)
+            done_indices.add(index)
             reused += 1
     return reused
 
 
-def build_record(row: dict, prompt: str, prompt_sha256: str, assistant_content: str, dataset: str) -> dict:
+def build_record(index: int, row: dict, prompt: str, prompt_sha256: str, assistant_content: str, dataset: str) -> dict:
     return {
         "messages": [
             {"role": "user", "content": prompt},
@@ -183,6 +195,7 @@ def build_record(row: dict, prompt: str, prompt_sha256: str, assistant_content: 
             "source_dataset": row.get("source_dataset"),
             "source_config": row.get("source_config"),
             "source_split": row.get("source_split"),
+            "index": index,
             "prompt_sha256": prompt_sha256,
             "teacher_generated": True,
         },
@@ -247,8 +260,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--reuse-from",
         type=Path,
         default=None,
-        help="An earlier run's output jsonl (or any file in this script's schema); records whose "
-        "prompt_sha256 aren't already in --output are copied over instead of re-calling the teacher.",
+        help="An earlier run's output jsonl (or any file in this script's schema) whose rows were "
+        "generated over a prompt sequence with the same index numbering; records whose index isn't "
+        "already in --output are copied over instead of re-calling the teacher.",
     )
     parser.add_argument(
         "--max-prompt-length",
@@ -272,32 +286,37 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def _generate_dataset(args: argparse.Namespace, llm, tokenizer) -> None:
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    done_hashes = _load_existing_hashes(args.output)
-    if done_hashes:
-        logger.info("resuming: %d prompts already present in %s", len(done_hashes), args.output)
+    done_indices = _load_done_indices(args.output)
+    if done_indices:
+        logger.info("resuming: %d prompts already present in %s", len(done_indices), args.output)
 
     if args.reuse_from is not None:
-        reused = _reuse_records(args.reuse_from, args.output, done_hashes)
+        reused = _reuse_records(args.reuse_from, args.output, done_indices)
         logger.info("reused %d prompts from %s", reused, args.reuse_from)
 
     rows = _load_rows(args.dataset, args.split, streaming=args.streaming, cache_dir=args.cache_dir)
 
     domain_filter = set(args.domain) if args.domain else None
-    pending: list[tuple[dict, str, str]] = []
+    pending: list[tuple[int, dict, str, str]] = []
     skipped_too_long = 0
+    index = -1
     for row in rows:
         if domain_filter is not None and row.get("domain") not in domain_filter:
             continue
         prompt = _extract_user_prompt(row)
         if not prompt:
             continue
-        prompt_sha256 = _prompt_sha256(row, prompt)
-        if prompt_sha256 in done_hashes:
+        # index counts every domain-filtered, non-empty-prompt row -- a stable position in
+        # the source sequence, independent of --max-prompt-length or resume state, so it
+        # stays comparable across runs/filters (see _load_done_indices).
+        index += 1
+        if index in done_indices:
             continue
+        prompt_sha256 = _prompt_sha256(row, prompt)
         if args.max_prompt_length is not None and len(tokenizer(prompt).input_ids) > args.max_prompt_length:
             skipped_too_long += 1
             continue
-        pending.append((row, prompt, prompt_sha256))
+        pending.append((index, row, prompt, prompt_sha256))
         if args.max_rows is not None and len(pending) >= args.max_rows:
             break
 
@@ -321,7 +340,7 @@ def _generate_dataset(args: argparse.Namespace, llm, tokenizer) -> None:
             chunk = pending[start : start + args.concurrency]
             prompt_texts = [
                 render_prompt(tokenizer, prompt, system_prompt=args.system_prompt, enable_thinking=args.enable_thinking)
-                for _, prompt, _ in chunk
+                for _, _, prompt, _ in chunk
             ]
             try:
                 outputs = llm.generate(prompt_texts, sampling_params=sampling_params)
@@ -330,13 +349,13 @@ def _generate_dataset(args: argparse.Namespace, llm, tokenizer) -> None:
                 failed += len(chunk)
                 continue
 
-            for (row, prompt, prompt_sha256), output in zip(chunk, outputs):
+            for (index, row, prompt, prompt_sha256), output in zip(chunk, outputs):
                 text = output.get("text") if isinstance(output, dict) else getattr(output, "text", None)
                 assistant_content = _clean_text(text)
                 if not assistant_content:
                     failed += 1
                     continue
-                record = build_record(row, prompt, prompt_sha256, assistant_content, dataset=args.dataset)
+                record = build_record(index, row, prompt, prompt_sha256, assistant_content, dataset=args.dataset)
                 fout.write(json.dumps(record, ensure_ascii=False) + "\n")
                 fout.flush()
                 written += 1
