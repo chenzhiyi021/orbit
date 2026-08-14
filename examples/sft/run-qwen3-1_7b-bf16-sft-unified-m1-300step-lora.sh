@@ -66,20 +66,29 @@
 #                                       distinction actually lives -- see the
 #                                       CAVEATS section below.
 #   - per_device_train_batch_size 1 / gradient_accumulation_steps 32
-#                                    -> NOT a 1:1 mapping. Orbit doesn't do
-#                                       per-device-batch * grad-accum; it packs
-#                                       tokens per GPU up to --max-tokens-per-gpu
-#                                       under --use-dynamic-batch-size, and
-#                                       GLOBAL_BATCH_SIZE below is the sample
-#                                       count aggregated into one optimizer
-#                                       step. Default GLOBAL_BATCH_SIZE=32
-#                                       mirrors the yaml's grad_accum count
-#                                       assuming a single data-parallel
-#                                       replica -- multiply by your actual DP
-#                                       world size to reproduce the source's
-#                                       76,800-example run (256/step * 300
-#                                       steps implies an 8x DP world size at
-#                                       this GLOBAL_BATCH_SIZE).
+#                                    -> NOT a 1:1 mapping, and NOT scaled by
+#                                       GPU count the way TRL's per-device
+#                                       batch is. Orbit's --global-batch-size /
+#                                       --rollout-batch-size are already the
+#                                       TOTAL sample count for one optimizer
+#                                       step across every GPU combined --
+#                                       orbit.ray.rollout._split_train_data_by_dp
+#                                       partitions that fixed total across the
+#                                       DP ranks, it does not multiply it by DP
+#                                       world size. So GLOBAL_BATCH_SIZE=32
+#                                       below already matches the yaml's
+#                                       effective batch (32) as-is, REGARDLESS
+#                                       of GPUS_PER_NODE -- changing
+#                                       GPUS_PER_NODE only changes how many of
+#                                       those 32 samples land on each GPU per
+#                                       step (throughput/memory), not the
+#                                       total processed. To reproduce a TRL
+#                                       run that itself used 8 real GPUs (true
+#                                       effective batch 32*8=256, hence 76,800
+#                                       examples over 300 steps), set
+#                                       ROLLOUT_BATCH_SIZE=GLOBAL_BATCH_SIZE=256
+#                                       explicitly -- do not try to get there
+#                                       via GPUS_PER_NODE.
 #   - max_length: 12288             -> no per-example truncation flag found in
 #                                       this codebase's examples; approximated
 #                                       via --max-tokens-per-gpu (a packing
@@ -118,8 +127,10 @@
 #     --dataset at the same prompt sequence/order M4--M6 used); this launcher
 #     has no way to verify or enforce that alignment.
 #   - 76,800 total examples vs GLOBAL_BATCH_SIZE=32 * NUM_ROLLOUT=300 = 9,600:
-#     the gap is DP world size (see mapping note above), not a mismatch --
-#     but you must size GPUS_PER_NODE/DP topology yourself to close it.
+#     the gap is NOT closed by GPUS_PER_NODE/DP world size (see mapping note
+#     above -- Orbit's batch args are already global, not per-GPU). To
+#     process 76,800 examples over 300 steps, raise ROLLOUT_BATCH_SIZE and
+#     GLOBAL_BATCH_SIZE to 256 instead.
 #   - save_total_limit (checkpoint retention) has no Orbit equivalent; disk
 #     usage across 15 checkpoints @ save-interval 20 is on you to manage.
 set -euo pipefail
