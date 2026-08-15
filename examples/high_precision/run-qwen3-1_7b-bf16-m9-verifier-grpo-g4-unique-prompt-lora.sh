@@ -131,7 +131,12 @@ PERF_ARGS=(
     --sequence-parallel
 )
 
-EVAL_ARGS=( --eval-interval 20 --skip-eval-before-train )
+# eval_strategy: "no" in the source, and no eval dataset is wired up here --
+# leaving --eval-interval unset (its default is None) skips
+# orbit_validate_args's "eval_datasets must be configured" assertion. Add
+# --eval-interval N plus --eval-prompt-data/--eval-config if you want in-loop
+# eval.
+EVAL_ARGS=()
 
 SGLANG_ARGS=(
     --rollout-num-gpus-per-engine 4
