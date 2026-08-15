@@ -70,13 +70,22 @@ CKPT_ARGS=(
 
 ROLLOUT_ARGS=(
     --prompt-data "${TRAIN_JSONL}"
-    --input-key "${INPUT_KEY:-question}"
-    --label-key "${LABEL_KEY:-answer}"
+    --input-key "${INPUT_KEY:-prompt}"
+    --label-key "${LABEL_KEY:-solution}"
     --apply-chat-template
     --apply-chat-template-kwargs '{"enable_thinking": false}'
     --rollout-shuffle
-    # Closest built-in rule-based verifier to unified_exact_answer_reward;
-    # swap --custom-rm-path in if the exact grader must match bit-for-bit.
+    # NOTE: m9-verifier-38k-aligned mixes two answer_type domains (math:
+    # symbolic/numeric, choice: single-letter science MCQ). --rm-type math
+    # (grade_answer_verl) only grades the math half correctly -- the ~19.3k
+    # "choice" rows need a categorical/letter grader (see
+    # orbit/rollout/rm_hub/gpqa.py's compute_gpqa_reward), not plain math
+    # equivalence. This is also just an approximation of the source's
+    # unified_exact_answer_reward, which doesn't exist in this codebase.
+    # Fix properly with a --custom-rm-path that dispatches on the
+    # (currently dropped) answer_type/domain columns, or a preprocessing
+    # pass that folds them into a `metadata.rm_type` column so orbit's
+    # built-in per-sample metadata.get("rm_type") routing does it for you.
     --rm-type math
     --num-rollout "${NUM_ROLLOUT}"
     --rollout-batch-size "${ROLLOUT_BATCH_SIZE}"
