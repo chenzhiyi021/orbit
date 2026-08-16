@@ -37,6 +37,15 @@ STAGE_MEGATRON_CKPT_TO=${STAGE_MEGATRON_CKPT_TO-${LOCAL_STAGE_ROOT}/Megatron-Bri
 # === Resources ===
 GPUS_PER_NODE="${GPUS_PER_NODE:-4}"
 RAY_NUM_CPUS="${RAY_NUM_CPUS:-16}"
+# Colocate mode: one SGLang engine spans the whole node, and training uses
+# every GPU on the node too, so both of these must stay consistent with
+# GPUS_PER_NODE if you override it -- ROLLOUT_NUM_GPUS_PER_ENGINE must equal
+# GPUS_PER_NODE exactly, and TENSOR_MODEL_PARALLEL_SIZE must evenly divide it.
+# Leaving these hardcoded at 4/2 while only setting GPUS_PER_NODE=2 crashes in
+# update_weight_from_tensor.py's dist.new_group() with "the new group's world
+# size should be less or equal to the world size set by init_process_group".
+TENSOR_MODEL_PARALLEL_SIZE="${TENSOR_MODEL_PARALLEL_SIZE:-2}"
+ROLLOUT_NUM_GPUS_PER_ENGINE="${ROLLOUT_NUM_GPUS_PER_ENGINE:-4}"
 
 # === Model args ===
 source "${ORBIT_ROOT}/orbit_plugins/model_args/qwen3-1.7B.sh"   # provides MODEL_ARGS=(...)
@@ -118,7 +127,7 @@ WANDB_ARGS=(
 )
 
 PERF_ARGS=(
-    --tensor-model-parallel-size 2
+    --tensor-model-parallel-size "${TENSOR_MODEL_PARALLEL_SIZE}"
     --pipeline-model-parallel-size 1
     --context-parallel-size 1
     --expert-model-parallel-size 1
@@ -139,7 +148,7 @@ PERF_ARGS=(
 EVAL_ARGS=()
 
 SGLANG_ARGS=(
-    --rollout-num-gpus-per-engine 4
+    --rollout-num-gpus-per-engine "${ROLLOUT_NUM_GPUS_PER_ENGINE}"
     --sglang-mem-fraction-static 0.3
     --rollout-num-gpus 0
     --sglang-max-running-requests 1024
