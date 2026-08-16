@@ -176,7 +176,6 @@ MISC_ARGS=(
 
 DEBUG_ARGS=(
     --log-passrate
-    --log-reward-category acc
 )
 
 PEFT_ARGS=(
