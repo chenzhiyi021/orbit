@@ -3,9 +3,16 @@
 
 For each ``--run`` spec, loads the raw (unconverted) Megatron distributed
 state dict at a series of iterations and computes the global cosine
-similarity of each intermediate checkpoint's weights against a designated
-"final" iteration within that same run. All runs are plotted on one figure
-so their similarity-to-final trajectories can be compared directly.
+similarity of each intermediate checkpoint's *update relative to the base
+model* (``delta_iter = W_iter - W_base``) against the final checkpoint's
+update (``delta_final = W_final - W_base``). All runs are plotted on one
+figure so their similarity-to-final trajectories can be compared directly.
+
+Comparing deltas rather than raw weights matters: raw weights are dominated
+by the shared base-model component (``W_t = W_base + delta_t``, with
+``delta_t`` tiny next to ``W_base``), so raw-weight cosine similarity sits
+at ~1.0 regardless of how much training actually changed the model. Deltas
+isolate the actual training-induced update.
 
 This intentionally skips HF conversion (no layer/expert unrolling, no
 architecture-specific renaming) since we only need raw tensors to compare
@@ -81,6 +88,31 @@ def resolve_iter_dir(checkpoint_root: Path, iteration: int) -> Path:
     return candidate
 
 
+def resolve_checkpoint_dir(checkpoint_path: Path) -> Path:
+    """Resolve a Megatron ``--load``-style path the same way Megatron itself does.
+
+    Accepts either a directory that already holds ``.metadata`` directly, or
+    a checkpoint root with a ``latest_checkpointed_iteration.txt`` tracker
+    (or, failing that, the highest ``iter_*`` subdirectory) -- matching
+    ``orbit/utils/arguments.py``'s expectations for ``--load``/``MEGATRON_LOAD``.
+    """
+    if (checkpoint_path / ".metadata").exists():
+        return checkpoint_path
+
+    tracker_path = checkpoint_path / "latest_checkpointed_iteration.txt"
+    if tracker_path.exists():
+        iteration = int(tracker_path.read_text().strip())
+        resolved = checkpoint_path / f"iter_{iteration:07d}"
+        if (resolved / ".metadata").exists():
+            return resolved
+
+    candidates = sorted(p for p in checkpoint_path.glob("iter_*") if (p / ".metadata").exists())
+    if candidates:
+        return candidates[-1]
+
+    raise FileNotFoundError(f"No DCP checkpoint metadata found under {checkpoint_path}")
+
+
 def load_weight_state_dict(iter_dir: Path) -> dict[str, torch.Tensor]:
     state_dict: dict[str, torch.Tensor] = {}
     dist_cp.state_dict_loader._load_state_dict(
@@ -92,6 +124,21 @@ def load_weight_state_dict(iter_dir: Path) -> dict[str, torch.Tensor]:
     return {k: v for k, v in state_dict.items() if isinstance(v, torch.Tensor)}
 
 
+def compute_delta(
+    state: dict[str, torch.Tensor], base: dict[str, torch.Tensor]
+) -> tuple[dict[str, torch.Tensor], list[str]]:
+    skipped: list[str] = sorted(set(state) ^ set(base))
+    delta: dict[str, torch.Tensor] = {}
+    for key in sorted(set(state) & set(base)):
+        w = state[key]
+        b = base[key]
+        if w.shape != b.shape:
+            skipped.append(key)
+            continue
+        delta[key] = w.to(torch.float32) - b.to(torch.float32)
+    return delta, skipped
+
+
 def global_cosine_similarity(
     a: dict[str, torch.Tensor], b: dict[str, torch.Tensor]
 ) -> tuple[float, list[str]]:
@@ -100,8 +147,8 @@ def global_cosine_similarity(
     norm_a_sq = 0.0
     norm_b_sq = 0.0
     for key in sorted(set(a) & set(b)):
-        ta = a[key].to(torch.float32).flatten()
-        tb = b[key].to(torch.float32).flatten()
+        ta = a[key].flatten()
+        tb = b[key].flatten()
         if ta.shape != tb.shape:
             skipped.append(key)
             continue
@@ -134,11 +181,28 @@ def main() -> None:
             "one per run to plot on the same figure"
         ),
     )
+    parser.add_argument(
+        "--base",
+        required=True,
+        type=Path,
+        help=(
+            "MEGATRON_LOAD-style path to the base/pretrained-init Megatron dist "
+            "checkpoint (same directory you pass as --load when launching "
+            "training), shared across all --run entries. Resolved the same way "
+            "Megatron resolves --load: latest_checkpointed_iteration.txt or the "
+            "highest iter_* subdirectory. All comparisons use "
+            "delta = weights - base_weights."
+        ),
+    )
     parser.add_argument("--output", type=Path, default=Path("ckpt_final_similarity.png"))
     parser.add_argument("--csv", type=Path, default=None)
     args = parser.parse_args()
 
     runs = [parse_run_spec(spec) for spec in args.runs]
+
+    base_dir = resolve_checkpoint_dir(args.base)
+    print(f"loading base checkpoint from {base_dir}")
+    base_state = load_weight_state_dict(base_dir)
 
     figure, axis = plt.subplots(figsize=(7, 5))
     csv_rows: list[tuple[str, int, float]] = []
@@ -146,6 +210,10 @@ def main() -> None:
         final_dir = resolve_iter_dir(run["root"], run["final_iter"])
         print(f"[{run['label']}] loading final checkpoint iter_{run['final_iter']:07d}")
         final_state = load_weight_state_dict(final_dir)
+        delta_final, final_skipped = compute_delta(final_state, base_state)
+        if final_skipped:
+            print(f"[{run['label']}] final iter_{run['final_iter']:07d}: {len(final_skipped)} keys missing from base")
+        del final_state
 
         steps: list[int] = []
         sims: list[float] = []
@@ -153,20 +221,25 @@ def main() -> None:
             iter_dir = resolve_iter_dir(run["root"], iteration)
             print(f"[{run['label']}] loading iter_{iteration:07d}")
             state = load_weight_state_dict(iter_dir)
-            similarity, skipped = global_cosine_similarity(state, final_state)
+            delta_iter, iter_skipped = compute_delta(state, base_state)
+            del state
+            if iter_skipped:
+                print(f"[{run['label']}] iter_{iteration:07d}: {len(iter_skipped)} keys missing from base")
+
+            similarity, skipped = global_cosine_similarity(delta_iter, delta_final)
             if skipped:
-                print(f"[{run['label']}] iter_{iteration:07d}: {len(skipped)} skipped/mismatched keys")
+                print(f"[{run['label']}] iter_{iteration:07d}: {len(skipped)} skipped/mismatched delta keys")
             steps.append(iteration)
             sims.append(similarity)
             csv_rows.append((run["label"], iteration, similarity))
-            del state
+            del delta_iter
 
         axis.plot(steps, sims, marker="o", label=run["label"])
-        del final_state
+        del delta_final
 
     axis.set_xlabel("Iteration")
-    axis.set_ylabel("Cosine similarity to final checkpoint")
-    axis.set_title("Checkpoint similarity to final checkpoint")
+    axis.set_ylabel("Cosine similarity of ΔW_iter to ΔW_final")
+    axis.set_title("Checkpoint update similarity to final update (ΔW vs. base)")
     axis.legend()
     axis.grid(alpha=0.3)
     figure.tight_layout()
@@ -176,7 +249,7 @@ def main() -> None:
     if args.csv:
         with args.csv.open("w", newline="") as handle:
             writer = csv.writer(handle)
-            writer.writerow(["run", "iteration", "cosine_similarity_to_final"])
+            writer.writerow(["run", "iteration", "delta_cosine_similarity_to_final"])
             writer.writerows(csv_rows)
         print(f"Saved CSV to {args.csv}")
 
