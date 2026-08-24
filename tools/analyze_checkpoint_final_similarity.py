@@ -96,6 +96,12 @@ def resolve_checkpoint_dir(checkpoint_path: Path) -> Path:
     (or, failing that, the highest ``iter_*`` subdirectory) -- matching
     ``orbit/utils/arguments.py``'s expectations for ``--load``/``MEGATRON_LOAD``.
     """
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(
+            f"Checkpoint path does not exist: {checkpoint_path!r} "
+            "(if this looks empty/'.', check that the corresponding env var was actually set)"
+        )
+
     if (checkpoint_path / ".metadata").exists():
         return checkpoint_path
 
