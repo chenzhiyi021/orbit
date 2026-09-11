@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # M6 -- uncentered sampled-token RKL estimator on refreshed student rollouts,
-# full fine-tuning. Training launcher only (score the saved checkpoints with
-# ../eval/eval-math-evalchemy.sh afterwards -- see "Scoring" below).
+# full fine-tuning.
+#
+# One-shot: trains 300 constant-LR steps, then scores every saved checkpoint on
+# aime24/aime25/amc23/math500. Self-contained -- no shared pipeline file.
 #
 # Ported from trl/recipes/unified/300step_constant/m6_opd_st_non_thinking.yaml.
 # Held constant across M4/M5/M6 and across full/lora/oft so the nine cells stay
 # comparable: 300 optimizer steps, global batch 256, constant LR 5e-6 with no warmup
 # or decay, weight decay 0, grad-norm clip 1.0, seed 42, one generation per prompt at
-# temperature 0.7 / top-p 1.0, 4096-token completions, non-thinking chat template,
+# temperature 0.7 / top-p 1.0, 8192-token completions, non-thinking chat template,
 # checkpoint every 20 steps (15 in total).
 #
 # Objective: the single-sample estimator of the same reverse KL M5 computes
@@ -28,31 +30,22 @@
 # because there the whole teacher distribution is reconstructed trainer-side and the
 # two distributions have to be compared on the same footing.)
 #
-# GPU count: this recipe is --colocate, so actor training, student rollout, and the
-# managed teacher all time-share the SAME GPUs. Under --colocate the teacher takes
-# zero extra bundles (orbit/ray/placement_group.py::_opd_teacher_extra_gpus), so the
-# job's GPU count is exactly GPUS_PER_NODE -- 2 by default (TP2, DP1). Global batch
-# 256 is a global quantity in orbit and is preserved regardless of GPU count; only
-# throughput changes. For 1 GPU set TENSOR_MODEL_PARALLEL_SIZE=1 (sequence-parallel
-# auto-drops); for 4 set GPUS_PER_NODE=4 (TP2 x DP2).
+# Checkpoints are full-finetune torch_dist shards. The eval stage converts each to
+# dense HF weights with tools/convert_torch_dist_to_hf.py, using BASE_MODEL=HF_CKPT.
+#
+# The recipe runs DeepSpeed ZeRO-3 on eight GPUs; orbit is Megatron and this runs on
+# four, so the parallelism split below (TP2 x DP2, colocated rollout, 2-GPU managed
+# teacher) is an orbit-side choice rather than a transcription. Global batch 256 is
+# preserved, so the optimization trajectory is unchanged; only throughput differs.
 #
 #   HF_CKPT=/path/to/hf/Qwen3-1.7B \
 #   MEGATRON_LOAD=/path/to/megatron/Qwen3-1.7B \
 #   OPD_TEACHER_CKPT=/path/to/hf/Qwen3-4B-Instruct-2507 \
-#   TRAIN_JSONL=/path/to/openreasoning_mixed_100k/train.parquet \
+#   TRAIN_JSONL=/path/to/opd_mixed_100k_shard_balanced \
+#   EVALCHEMY_ROOT=/path/to/evalchemy \
 #       bash examples/on_policy_distillation/unified_300step_constant/run-m6-opd-st-non-thinking-full.sh
 #
-# Dataset keys: --input-key / --label-key default to question / answer (the
-# openreasoning train_qa schema). If your parquet uses different column names
-# (e.g. prompt), pass INPUT_KEY=prompt LABEL_KEY=answer -- the schema is checked
-# before launch and the run aborts with the available columns listed. Set
-# LABEL_KEY= (empty) to omit --label-key entirely.
-#
-# Scoring (separate step, after training):
-#   EVALCHEMY_ROOT=/path/to/evalchemy \
-#   RUNNER_PYTHON_BIN="$(which python)" \
-#   SAVE_DIR=<this run's SAVE_DIR> DATA_NAMES=math500 MAX_CHECKPOINTS=0 \
-#       bash examples/on_policy_distillation/eval/eval-math-evalchemy.sh
+# RUN_TRAIN=0 evaluates an existing run; RUN_EVAL=0 trains only.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -61,72 +54,55 @@ source "${ORBIT_ROOT}/scripts/lib/tool_env.sh"
 source "${ORBIT_ROOT}/scripts/lib/common.sh"
 
 # === Recipe identity ===
-LAUNCHER_NAME="${LAUNCHER_NAME:-unified_300step_constant_m6_opd_st_full_non_thinking}"
-WANDB_PROJECT="${WANDB_PROJECT:-orbit-adapt}"
-WANDB_GROUP="${WANDB_GROUP:-${LAUNCHER_NAME}}"
+LAUNCHER_NAME=unified_300step_constant_m6_opd_st_full_non_thinking
+WANDB_PROJECT=${WANDB_PROJECT:-orbit-adapt}
+WANDB_GROUP=${WANDB_GROUP:-${LAUNCHER_NAME}}
 PRECISION_PROFILE=bf16
 ORBIT_ENTRYPOINT="${ORBIT_ENTRYPOINT:-${ORBIT_ROOT}/train.py}"
-RUN_LOG="${RUN_LOG:-${ORBIT_ROOT}/logs/${LAUNCHER_NAME}_$(date +%Y%m%d_%H%M%S).log}"
+RUN_LOG="${ORBIT_ROOT}/logs/${LAUNCHER_NAME}_$(date +%Y%m%d_%H%M%S).log"
 
-# === Paths ===
-: "${HF_CKPT:?set HF_CKPT to the Qwen3-1.7B Hugging Face checkpoint}"
-: "${MEGATRON_LOAD:?set MEGATRON_LOAD to the Qwen3-1.7B Megatron torch_dist checkpoint}"
-: "${OPD_TEACHER_CKPT:?set OPD_TEACHER_CKPT to the frozen Qwen3-4B-Instruct-2507 Hugging Face checkpoint}"
-: "${TRAIN_JSONL:?set TRAIN_JSONL to the OpenReasoning training data (.jsonl or .parquet)}"
+# === Paths, shared by both stages ===
+# Cluster defaults; override any of them in the environment.
+HF_CKPT="${HF_CKPT:-/mnt/L202500430/orbit/data/hf_ckpts/Qwen3-1.7B}"
+MEGATRON_LOAD="${MEGATRON_LOAD:-/mnt/L202500430/orbit/data/megatron_ckpts/Qwen3-1.7B}"
+OPD_TEACHER_CKPT="${OPD_TEACHER_CKPT:-/mnt/L202500430/orbit/data/hf_ckpts/Qwen3-4B-Instruct-2507}"
+TRAIN_JSONL="${TRAIN_JSONL:-/mnt/L202500430/orbit/data/openreasoning_mixed_100k/train_qa.parquet}"
+EVALCHEMY_ROOT="${EVALCHEMY_ROOT:-/mnt/L202500430/evalchemy}"
+# Grading runs in its own venv: lm_eval is not in the Orbit environment.
+RUNNER_PYTHON_BIN="${RUNNER_PYTHON_BIN:-/mnt/L202500430/.venv-opd-eval/bin/python}"
 
 # Fail here with a readable message rather than deep inside Megatron/SGLang.
 for _p in "${HF_CKPT}" "${MEGATRON_LOAD}" "${OPD_TEACHER_CKPT}" "${TRAIN_JSONL}"; do
     if [ ! -e "${_p}" ]; then
-        echo "[m6_opd_st_full] ERROR: path does not exist: ${_p}" >&2
+        echo "[$(basename "${BASH_SOURCE[0]}")] ERROR: path does not exist: ${_p}" >&2
         exit 1
     fi
 done
-
-# Dataset column check: a missing --input-key column otherwise surfaces only as
-# "jinja2 UndefinedError: None has no element 0" once the RolloutManager actor
-# renders the chat template.
-INPUT_KEY="${INPUT_KEY:-question}"
-LABEL_KEY="${LABEL_KEY-answer}"
-python3 - "${TRAIN_JSONL}" "${INPUT_KEY}" "${LABEL_KEY}" <<'PY'
-import json, sys
-path, prompt_key, label_key = sys.argv[1], sys.argv[2], sys.argv[3]
-if path.endswith(".parquet"):
-    import pyarrow.parquet as pq
-    cols = set(pq.read_schema(path).names)
-else:
-    with open(path, encoding="utf-8") as handle:
-        cols = set(json.loads(next(handle)).keys())
-want = [prompt_key] + ([label_key] if label_key else [])
-missing = [k for k in want if k not in cols]
-if missing:
-    sys.exit(
-        f"[m6_opd_st_full] {path}\n"
-        f"  missing column(s): {missing}\n"
-        f"  available columns: {sorted(cols)}\n"
-        f"  pass INPUT_KEY=/LABEL_KEY= to match this schema (LABEL_KEY= to drop --label-key)."
-    )
-print(f"[m6_opd_st_full] dataset schema ok: input_key={prompt_key!r} label_key={label_key or None!r}")
-PY
-
 SAVE_DIR="${SAVE_DIR:-${ORBIT_ROOT}/orbit_ckpts/${LAUNCHER_NAME}}"
 
-# In-training eval is off (the recipe sets eval_strategy: "no"); score the saved
-# checkpoints with ../eval/eval-math-evalchemy.sh -- see header.
+# In-training eval is off (the recipe sets eval_strategy: "no"); scoring is the
+# evalchemy sweep in stage 2 below.
 DISABLE_EVAL=1
 
+RUN_TRAIN="${RUN_TRAIN:-1}"
+RUN_EVAL="${RUN_EVAL:-0}"
+# Fail now, not after a multi-hour train, if the eval stage could never work.
+if [ "${RUN_EVAL}" = "1" ]; then
+    if [ ! -d "${EVALCHEMY_ROOT}/eval/chat_benchmarks" ]; then
+        echo "[m6_opd_st_full] ERROR: EVALCHEMY_ROOT='${EVALCHEMY_ROOT}' has no eval/chat_benchmarks/" >&2
+        exit 1
+    fi
+fi
+
 # === Resources ===
-# --colocate collapses actor + rollout + teacher onto GPUS_PER_NODE GPUs; see header.
+# Four GPUs. --colocate: actor training, student rollout, and the managed teacher
+# time-share them. The recipe's eight-GPU shape (per_device 1 x grad_accum 32 x 8)
+# existed only to reach global batch 256; --global-batch-size is a global quantity in
+# orbit, so 256 is preserved here with more accumulation per GPU. TP2 x DP2.
 GPUS_PER_NODE="${GPUS_PER_NODE:-2}"
 ROLLOUT_NUM_GPUS="${ROLLOUT_NUM_GPUS:-${GPUS_PER_NODE}}"
-OPD_TEACHER_NUM_GPUS="${OPD_TEACHER_NUM_GPUS:-${GPUS_PER_NODE}}"
+OPD_TEACHER_NUM_GPUS="${OPD_TEACHER_NUM_GPUS:-2}"
 RAY_NUM_CPUS="${RAY_NUM_CPUS:-64}"
-
-# === Parallelism (override for non-2-GPU topologies) ===
-TENSOR_MODEL_PARALLEL_SIZE="${TENSOR_MODEL_PARALLEL_SIZE:-2}"
-PIPELINE_MODEL_PARALLEL_SIZE="${PIPELINE_MODEL_PARALLEL_SIZE:-1}"
-CONTEXT_PARALLEL_SIZE="${CONTEXT_PARALLEL_SIZE:-1}"
-EXPERT_MODEL_PARALLEL_SIZE="${EXPERT_MODEL_PARALLEL_SIZE:-1}"
-EXPERT_TENSOR_PARALLEL_SIZE="${EXPERT_TENSOR_PARALLEL_SIZE:-1}"
 
 # === Model args ===
 source "${ORBIT_ROOT}/orbit_plugins/model_args/qwen3-1.7B.sh"   # provides MODEL_ARGS=(...)
@@ -147,7 +123,7 @@ CKPT_ARGS=(
     --hf-checkpoint "${HF_CKPT}"
     --load "${MEGATRON_LOAD}"
     --save "${SAVE_DIR}"
-    --save-interval "${SAVE_INTERVAL:-1}"
+    --save-interval "${SAVE_INTERVAL:-2}"
     --no-save-optim
     --no-save-rng
     --megatron-to-hf-mode bridge
@@ -155,7 +131,8 @@ CKPT_ARGS=(
 
 ROLLOUT_ARGS=(
     --prompt-data "${TRAIN_JSONL}"
-    --input-key "${INPUT_KEY}"
+    --input-key "${INPUT_KEY:-messages}"
+    # --label-key "${LABEL_KEY:-answer}"
     --apply-chat-template
     --apply-chat-template-kwargs '{"enable_thinking": false}'
     --rollout-shuffle
@@ -174,21 +151,16 @@ ROLLOUT_ARGS=(
     --custom-rm-path orbit.rollout.opd_sglang.reward_func
     --custom-reward-post-process-path orbit.rollout.opd_sglang.post_process
 )
-# --label-key is optional for MOPD (the reward comes from the teacher, not the math
-# checker); include it only when LABEL_KEY is non-empty.
-if [ -n "${LABEL_KEY}" ]; then
-    ROLLOUT_ARGS+=( --label-key "${LABEL_KEY}" )
-fi
 
 # Constant 5e-6, no warmup, no decay.
 OPTIMIZER_ARGS=(
     --optimizer adam
     --lr "${LR:-5e-6}"
     --lr-decay-style constant
-    --weight-decay "${WEIGHT_DECAY:-0.0}"
+    --weight-decay 0.0
     --adam-beta1 0.9
     --adam-beta2 0.999
-    --clip-grad "${MAX_GRAD_NORM:-1.0}"
+    --clip-grad 1.0
 )
 
 # The frozen teacher is served by this job: orbit launches it as an extra sglang model
@@ -224,21 +196,18 @@ WANDB_ARGS=(
 )
 
 PERF_ARGS=(
-    --tensor-model-parallel-size "${TENSOR_MODEL_PARALLEL_SIZE}"
-    --pipeline-model-parallel-size "${PIPELINE_MODEL_PARALLEL_SIZE}"
-    --context-parallel-size "${CONTEXT_PARALLEL_SIZE}"
-    --expert-model-parallel-size "${EXPERT_MODEL_PARALLEL_SIZE}"
-    --expert-tensor-parallel-size "${EXPERT_TENSOR_PARALLEL_SIZE}"
+    --tensor-model-parallel-size 2
+    --pipeline-model-parallel-size 1
+    --context-parallel-size 1
+    --expert-model-parallel-size 1
+    --expert-tensor-parallel-size 1
     --use-dynamic-batch-size
     --max-tokens-per-gpu "${MAX_TOKENS_PER_GPU:-8192}"
     --recompute-granularity full
     --recompute-method uniform
-    --recompute-num-layers "${RECOMPUTE_NUM_LAYERS:-1}"
+    --recompute-num-layers 1
+    --sequence-parallel
 )
-# Megatron requires TP > 1 for sequence parallelism.
-if [ "${TENSOR_MODEL_PARALLEL_SIZE}" -gt 1 ]; then
-    PERF_ARGS+=( --sequence-parallel )
-fi
 
 # Emptied by validate_eval_args because DISABLE_EVAL=1 above.
 EVAL_ARGS=()
@@ -257,7 +226,7 @@ SGLANG_ARGS=(
 )
 
 MISC_ARGS=(
-    --seed "${SEED:-42}"
+    --seed 42
     --attention-dropout 0.0
     --hidden-dropout 0.0
     --attention-backend flash
