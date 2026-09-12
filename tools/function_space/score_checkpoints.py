@@ -39,6 +39,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
 import transformers
 from datasets import load_from_disk
@@ -87,12 +88,27 @@ def load_scoring_model(checkpoint, overrides: dict):
     ).eval().requires_grad_(False).to("cuda")
 
 
+def scalar_has_finite_teacher_rkl(scalar_path: Path) -> bool:
+    if not scalar_path.exists():
+        return False
+    frame = pd.read_parquet(scalar_path, columns=["mean_teacher_rkl_t0p7"])
+    return bool(np.isfinite(frame["mean_teacher_rkl_t0p7"].to_numpy(dtype=float)).all())
+
+
 def score_one(label: str, checkpoint, *, bank_info: dict, dataset, teacher_logits, out: Path,
               base_config: AutoConfig, config: dict, relative: bool, step: int = 0) -> None:
     target = out / f"{label}.npz"
-    if target.exists() and target.with_suffix(".json").exists():
+    # A prior pass may have scored this run without teacher logits (teacher_cache
+    # was null). If teacher_logits is now available but the cached scalars are
+    # still all-NaN for mean_teacher_rkl_t0p7, force a rescore instead of
+    # silently skipping -- otherwise adding teacher_cache to config.json later
+    # and rerunning does nothing.
+    needs_teacher_rescore = teacher_logits is not None and not scalar_has_finite_teacher_rkl(target.with_suffix(".scalars.parquet"))
+    if target.exists() and target.with_suffix(".json").exists() and not needs_teacher_rescore:
         print(f"skip complete {label}", flush=True)
         return
+    if needs_teacher_rescore and target.exists():
+        print(f"RESCORE {label}: teacher_cache now available, existing scalars have no teacher RKL/FKL", flush=True)
     started = time.monotonic()
     print(f"START {bank_info['id']} {label} {checkpoint}", flush=True)
     model_config, overrides = effective_model_config(checkpoint)
