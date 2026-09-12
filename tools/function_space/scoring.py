@@ -53,6 +53,7 @@ def score_bank(
     exact_positions: int,
     teacher_logits: np.ndarray | None = None,
     temperature: float = 0.7,
+    space: str = "logit",
 ) -> tuple[np.ndarray, np.ndarray, pd.DataFrame]:
     """Score a fixed prefix bank.
 
@@ -62,15 +63,33 @@ def score_bank(
     ``domain`` -- see ``README.md`` for the exact schema, matching the
     HF ``datasets`` bank_a / bank_b layout used on the trl side.
 
+    ``space`` controls what gets sketched/stored as "exact":
+      - ``"logit"`` (default, unchanged from the original scorer): the
+        vocabulary-centered logits, ``z - mean(z)``. Near-zero-probability
+        tail tokens get equal weight to head tokens here.
+      - ``"prob"``: the post-softmax probabilities ``softmax(z)`` directly
+        (no centering needed -- any two probability vectors already have the
+        same mean, 1/V, so centering is a no-op and is skipped). Tail tokens
+        are automatically down-weighted since their probability is near 0.
+        Use this to check whether a centered-logit-space finding (e.g. a
+        cosine-similarity clustering) survives in probability space, or was
+        partly an artifact of the uniform per-token weighting logits give
+        the vocabulary tail. See README.md.
+
     Returns ``(sketches, exact, scalars)``:
       - ``sketches``: (prompts, 3 seeds, positions, sketch_dimension) float32,
-        CountSketch of the vocabulary-centered logits.
+        CountSketch of the vocabulary-centered logits or of the
+        probabilities, per ``space``.
       - ``exact``: (min(exact_positions, total_positions), vocab) float32,
-        uncompressed centered logits for the first ``exact_positions`` rows,
-        used only to validate the sketch (see ``relations.sketch_gate``).
+        uncompressed centered-logit or probability vectors (per ``space``)
+        for the first ``exact_positions`` rows, used only to validate the
+        sketch (see ``relations.sketch_gate``).
       - ``scalars``: per-position NLL / entropy / teacher RKL & FKL (if a
-        teacher logits array is supplied).
+        teacher logits array is supplied) -- unaffected by ``space``, always
+        computed from the raw logits.
     """
+    if space not in ("logit", "prob"):
+        raise ValueError(f"space must be 'logit' or 'prob', got {space!r}")
     vocab = model.config.vocab_size
     maps = sketch_maps(vocab, sketch_dimension, device)
     all_sketches: list[np.ndarray] = []
@@ -94,20 +113,24 @@ def score_bank(
             selected_hidden = hidden[batch_index].index_select(0, hidden_positions)
             logits = model.lm_head(selected_hidden).float()
             centered = logits - logits.mean(dim=-1, keepdim=True)
+            log_probs = torch.log_softmax(logits, dim=-1)
+            probs = log_probs.exp()
+            # What actually gets sketched/stored as "exact" -- see the `space`
+            # docstring above. Everything else (nll, entropy, teacher RKL/FKL,
+            # mean_logit_l2) is computed the same way regardless of `space`.
+            sketch_source = centered if space == "logit" else probs
             per_seed = []
             for bucket, sign in maps:
                 output = torch.zeros(logits.shape[0], sketch_dimension, dtype=torch.float32, device=device)
-                output.scatter_add_(1, bucket.expand(logits.shape[0], -1), centered * sign)
+                output.scatter_add_(1, bucket.expand(logits.shape[0], -1), sketch_source * sign)
                 per_seed.append(output)
             all_sketches.append(torch.stack(per_seed).cpu().numpy().astype(np.float32))
             if len(all_exact) * 64 < exact_positions:
                 remaining = max(0, exact_positions - len(all_exact) * 64)
-                all_exact.append(centered[:remaining].cpu().numpy().astype(np.float32))
+                all_exact.append(sketch_source[:remaining].cpu().numpy().astype(np.float32))
             next_positions = torch.from_numpy(prompt_length + completion_positions).to(device)
             next_tokens = input_ids[batch_index].index_select(0, next_positions)
-            log_probs = torch.log_softmax(logits, dim=-1)
             nll = -log_probs.gather(1, next_tokens[:, None]).squeeze(1)
-            probs = torch.softmax(logits, dim=-1)
             entropy = -(probs * log_probs).sum(-1)
             teacher_rkl = teacher_fkl = math.nan
             if teacher_logits is not None:

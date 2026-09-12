@@ -63,6 +63,7 @@ def load_config(path: Path) -> dict:
     config.setdefault("batch_size", 2)
     config.setdefault("exact_positions", 16)
     config.setdefault("teacher_temperature", 0.7)
+    config.setdefault("space", "logit")
     return config
 
 
@@ -121,7 +122,7 @@ def score_one(label: str, checkpoint, *, bank_info: dict, dataset, teacher_logit
     model = load_scoring_model(checkpoint, overrides)
     sketches, exact, scalars = score_bank(
         model, dataset, "cuda", config["sketch_dimension"], config["batch_size"], config["exact_positions"],
-        teacher_logits=teacher_logits, temperature=config["teacher_temperature"],
+        teacher_logits=teacher_logits, temperature=config["teacher_temperature"], space=config["space"],
     )
     if relative:
         with np.load(out / "Base.npz") as base_archive:
@@ -130,7 +131,8 @@ def score_one(label: str, checkpoint, *, bank_info: dict, dataset, teacher_logit
     save_score(target, sketches, exact, scalars, dict(
         run=label, step=step, checkpoint=str(checkpoint), bank=bank_info["path"], bank_id=bank_info["id"],
         sketch_seeds=SKETCH_SEEDS, sketch_dimension=config["sketch_dimension"], dtype_on_disk="float16",
-        logits_centered_over_vocabulary=True, relative_to_base=relative,
+        sketch_space=config["space"], logits_centered_over_vocabulary=(config["space"] == "logit"),
+        relative_to_base=relative,
         model_config_gate=True, effective_model_config=effective, config_compatibility_overrides=overrides,
         transformers_version=transformers.__version__, torch_version=torch.__version__,
         cuda_version=torch.version.cuda, gpu=torch.cuda.get_device_name() if torch.cuda.is_available() else None,
@@ -168,13 +170,24 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--bank", required=True, help="key into config['banks']")
+    parser.add_argument("--space", choices=("logit", "prob"), default=None,
+                         help="overrides config['space'] (default 'logit'). 'prob' sketches "
+                              "post-softmax probabilities instead of centered logits -- see "
+                              "scoring.score_bank's docstring and README.md. Written to a "
+                              "'prob/' subdirectory so it never overwrites existing logit-space "
+                              "results for the same bank.")
     args = parser.parse_args()
     config = load_config(args.config)
+    if args.space is not None:
+        config["space"] = args.space
     bank_cfg = config["banks"][args.bank]
     bank_info = {"id": args.bank, "path": bank_cfg["path"]}
     dataset = load_from_disk(bank_cfg["path"])
     out = Path(config["output_root"]) / args.bank
+    if config["space"] != "logit":
+        out = out / config["space"]
     out.mkdir(parents=True, exist_ok=True)
+    print(f"space={config['space']!r} -> writing to {out}", flush=True)
 
     teacher_logits = None
     teacher_cache = bank_cfg.get("teacher_cache")

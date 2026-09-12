@@ -15,9 +15,18 @@ Differences from the trl version:
     found there too.
   * Everything else (CountSketch gate, bootstrap CI, per-domain breakdown,
     the plot itself) is unchanged from analyze.py.
+  * ``--space {logit,prob}`` (new, not in the trl version): logit (default)
+    reproduces the original centered-logit-space cosine unchanged. prob
+    sketches post-softmax probabilities instead -- run
+    ``score_checkpoints.py ... --space prob`` first, then pass the same
+    ``--space prob`` here. Use this to check whether a clustering found in
+    logit space survives once near-zero-probability tail tokens stop being
+    weighted equally with head tokens.
 
 Usage:
     python plot_cosine_heatmap.py --config config.json --bank bank_a \\
+        --runs "M6-FullFT-trl,M6-FullFT-orbit,M6-OFT,M6-LoRA"
+    python plot_cosine_heatmap.py --config config.json --bank bank_a --space prob \\
         --runs "M6-FullFT-trl,M6-FullFT-orbit,M6-OFT,M6-LoRA"
 """
 from __future__ import annotations
@@ -73,11 +82,22 @@ def main() -> None:
     parser.add_argument("--bank", required=True, help="key into config['banks']")
     parser.add_argument("--runs", default=None, help="comma-separated run names, display order; default: auto-discover")
     parser.add_argument("--extra-cache", type=Path, default=None, help="extra directory of {run}_step*.npz to merge in (e.g. a historical cache)")
-    parser.add_argument("--output", type=Path, default=None, help="default: config['output_root']/<bank>/heatmap")
+    parser.add_argument("--space", choices=("logit", "prob"), default=None,
+                         help="overrides config['space'] (default 'logit'). Must match the "
+                              "--space you used with score_checkpoints.py for this bank -- "
+                              "reads from <output_root>/<bank>/ for 'logit' (unchanged default "
+                              "path) or <output_root>/<bank>/prob/ for 'prob'.")
+    parser.add_argument("--output", type=Path, default=None, help="default: config['output_root']/<bank>[/<space>]/heatmap")
     args = parser.parse_args()
     config = json.loads(args.config.read_text())
+    space = args.space or config.get("space", "logit")
     bank_dir = Path(config["output_root"]) / args.bank
-    assert (bank_dir / "COMPLETE.json").exists(), f"Run score_checkpoints.py --bank {args.bank} first"
+    if space != "logit":
+        bank_dir = bank_dir / space
+    assert (bank_dir / "COMPLETE.json").exists(), (
+        f"Run score_checkpoints.py --bank {args.bank}"
+        f"{'' if space == 'logit' else f' --space {space}'} first (looked in {bank_dir})"
+    )
     results = args.output or (bank_dir / "heatmap")
     results.mkdir(parents=True, exist_ok=True)
 
@@ -135,22 +155,34 @@ def main() -> None:
     if domain_rows:
         pd.DataFrame(domain_rows).to_csv(results / "pairwise_by_domain.csv", index=False)
     gate_frame.to_csv(results / "countsketch_exact_gate.csv", index=False)
-    (results / "VALIDATION.json").write_text(json.dumps({"gate": gate, "runs": runs}, indent=2) + "\n")
+    (results / "VALIDATION.json").write_text(json.dumps({"gate": gate, "runs": runs, "space": space}, indent=2) + "\n")
 
-    report = [f"# Function-space cosine heatmap: {args.bank}", "",
+    space_desc = ("Vocabulary-centered logits minus Base" if space == "logit"
+                  else "Post-softmax probabilities minus Base (no centering needed -- "
+                       "probability vectors already share the same mean, 1/V)")
+    space_limit = (
+        "- This is centered-*logit*-space cosine, not probability-space. Near-zero-probability "
+        "tail tokens get equal weight to head tokens here; rerun with --space prob (and "
+        "score_checkpoints.py --space prob first) to check whether a finding here survives in "
+        "probability space."
+        if space == "logit" else
+        "- This is *probability*-space cosine: near-zero-probability tail tokens are automatically "
+        "down-weighted (their contribution to any delta is ~0), unlike the centered-logit version "
+        "(--space logit, the default) which weights every vocabulary token equally regardless of "
+        "how likely it is. Compare both if a clustering only shows up in one of them."
+    )
+    report = [f"# Function-space cosine heatmap: {args.bank} ({space} space)", "",
         f"Runs: {', '.join(runs)}.", "",
-        "Vocabulary-centered logits minus Base, CountSketch seeds 3407/3408/3409, dimension "
+        f"{space_desc}, CountSketch seeds 3407/3408/3409, dimension "
         f"{config.get('sketch_dimension', 1024)}. Similarity is the mean of three seed-wise cosine "
-        "similarities of logit deltas. CI: 1000 prompt-cluster bootstrap samples.", "",
+        "similarities of the deltas. CI: 1000 prompt-cluster bootstrap samples.", "",
         "## Cosine matrix", "", md_table(matrix.reset_index(names="run")), "",
         "## CountSketch validation gate (exact vs sketch, 16-position slice)", "",
         "```json", json.dumps(gate, indent=2), "```", "",
         "## Interpretation limits", "",
-        "- Cosine measures alignment of *logit changes*, not checkpoint accuracy or "
+        "- Cosine measures alignment of *changes*, not checkpoint accuracy or "
         "probability-distribution identity.",
-        "- This is centered-*logit*-space cosine, not probability-space. Near-zero-probability "
-        "tail tokens get equal weight to head tokens here; if you need the probability-space "
-        "(softmax) version, add it as a second pass -- it is not computed by this script.",
+        space_limit,
         "- If mixing runs scored by different codebases/environments, check each bank's "
         "`baseline_parity.json` (written by score_checkpoints.py) before trusting cross-run cosines.",
         ""]
@@ -163,7 +195,8 @@ def main() -> None:
     im = ax.imshow(matrix.to_numpy(), vmin=-1, vmax=1, cmap="coolwarm")
     ax.set_xticks(range(len(runs)), runs, rotation=35, ha="right")
     ax.set_yticks(range(len(runs)), runs)
-    ax.set_title(f"{args.bank}: cosine of centered-logit deltas")
+    title_space = "centered-logit deltas" if space == "logit" else "probability deltas"
+    ax.set_title(f"{args.bank}: cosine of {title_space}")
     for i in range(len(runs)):
         for j in range(len(runs)):
             ax.text(j, i, f"{matrix.iloc[i, j]:.3f}", ha="center", va="center", fontsize=9)

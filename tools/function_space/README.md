@@ -115,6 +115,34 @@ confound entirely -- you're only still exposed to whatever numerical
 difference exists between the *training* stacks (see below), not the
 scoring stack.
 
+## Probability-space cosine (`--space prob`)
+
+By default (`--space logit`, unchanged), the cosine is computed on
+vocabulary-**centered logits** (`z - mean(z)`). This weights every
+vocabulary token equally, including near-zero-probability tail tokens --
+which can matter a lot: a method that mostly reshuffles the tail can show a
+large centered-logit delta while barely moving the actual output
+distribution.
+
+Pass `--space prob` to both scripts to sketch **post-softmax probabilities**
+instead (`softmax(z)`, no centering needed since probability vectors already
+share the same mean, 1/V). Tail tokens are automatically down-weighted
+there, since their probability is ~0.
+
+```
+python score_checkpoints.py --config config.json --bank bank_a --space prob
+python plot_cosine_heatmap.py --config config.json --bank bank_a --space prob \
+    --runs "M6-FullFT-trl,M6-OFT-orbit,M6-LoRA-orbit"
+```
+
+Writes to `<output_root>/<bank>/prob/...` -- a separate tree from the
+default logit-space results, so running this never touches or requires
+re-running anything you've already scored. **Run both** and compare: if a
+clustering/gap you found in logit space also shows up in probability space,
+it's a real functional finding; if it only shows up in one of them, the
+logit-space version may have been (partly) a tail-weighting artifact -- see
+the `REPORT.md` written by each pass for the exact caveat text.
+
 ## Residual issues / not verified
 
 I could not execute any of this in the environment I wrote it in -- no GPU,
