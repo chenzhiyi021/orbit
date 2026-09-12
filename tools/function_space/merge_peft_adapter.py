@@ -33,6 +33,18 @@ import torch
 from peft import PeftModel
 from transformers import AutoModelForCausalLM
 
+# peft's LoRA dispatch probes is_torchao_available() to decide whether to use
+# a torchao-quantized LoRA layer variant. On some installs that probe itself
+# raises (rather than returning False) if an incompatible torchao version is
+# present, even though we never touch torchao -- we're merging into plain
+# bf16 tensors. Patch it to a hard False so the probe can't blow up; this
+# only affects this process, not the installed torchao package.
+try:
+    import peft.tuners.lora.torchao as _lora_torchao
+    _lora_torchao.is_torchao_available = lambda: False
+except ImportError:
+    pass
+
 # Same asset list convert_torch_dist_to_hf.py copies from --origin-hf-dir:
 # tokenizer + misc config files that aren't part of the merged weight files
 # themselves, so plain transformers/vLLM/SGLang tooling can load the result.
