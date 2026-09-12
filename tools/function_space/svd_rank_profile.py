@@ -78,9 +78,12 @@ def pick_representative_tensors(locations: dict[str, Path]) -> list[str]:
     return names
 
 
-def rank_profile(delta: torch.Tensor, energy_thresholds=(0.90, 0.95, 0.99)) -> dict:
+def rank_profile(delta: torch.Tensor, noise_floor: float = 0.0, energy_thresholds=(0.90, 0.95, 0.99)) -> dict:
     matrix = delta.float()
     singular = torch.linalg.svdvals(matrix)
+    raw_frobenius_norm = float(singular.square().sum() ** 0.5)
+    if noise_floor > 0 and singular.numel():
+        singular = singular[singular >= noise_floor * singular.max()]
     total_energy = float((singular ** 2).sum())
     cumulative = torch.cumsum(singular ** 2, dim=0) / max(total_energy, 1e-30)
     hard_rank = int((singular > singular.max() * 1e-6).sum()) if singular.numel() else 0
@@ -91,7 +94,7 @@ def rank_profile(delta: torch.Tensor, energy_thresholds=(0.90, 0.95, 0.99)) -> d
         ranks_at[threshold] = min(idx + 1, singular.numel())
     return dict(
         shape=tuple(matrix.shape), min_dim=min(matrix.shape),
-        frobenius_norm=float(singular.square().sum() ** 0.5),
+        frobenius_norm=raw_frobenius_norm,
         hard_rank=hard_rank, stable_rank=stable_rank,
         **{f"rank_at_{int(t * 100)}pct_energy": v for t, v in ranks_at.items()},
     )
@@ -104,6 +107,9 @@ def main() -> None:
     parser.add_argument("--tensors", default=None, help="comma-separated tensor names; default: auto-pick a representative spread")
     parser.add_argument("--all-target-tensors", action="store_true",
                          help="scan every canonical q/k/v/o/gate/up/down tensor instead of a representative sample (slower)")
+    parser.add_argument("--noise-floor", type=float, default=0.0,
+                         help="zero out singular values below this fraction of the largest one before computing "
+                              "rank/energy stats -- denoises bf16-merge numerical floor; e.g. try 0.01")
     args = parser.parse_args()
 
     checkpoints = {}
@@ -128,7 +134,7 @@ def main() -> None:
         for name, path in checkpoints.items():
             other = load_tensor(path, ckpt_locations[name], tensor_name).float()
             delta = other - base_tensor
-            profile = rank_profile(delta)
+            profile = rank_profile(delta, noise_floor=args.noise_floor)
             frac_90 = profile["rank_at_90pct_energy"] / profile["min_dim"]
             frac_95 = profile["rank_at_95pct_energy"] / profile["min_dim"]
             frac_99 = profile["rank_at_99pct_energy"] / profile["min_dim"]
