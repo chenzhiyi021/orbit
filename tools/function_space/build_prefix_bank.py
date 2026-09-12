@@ -83,10 +83,26 @@ def load_prompt_rows(args) -> list[dict]:
     return rows
 
 
+def parse_messages(value):
+    """Accept an already-parsed list, valid JSON, or a Python repr() string
+    (single-quoted dicts, e.g. pandas/parquet round-tripped a list-of-dict
+    column as its str() -- seen on openreasoning_mixed_100k's `messages`
+    column)."""
+    if isinstance(value, list):
+        return value
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        import ast
+        return ast.literal_eval(value)
+
+
 def prompt_ids_for(row: dict, args, tokenizer) -> list[int]:
     value = row[args.prompt_field]
     if args.chat:
-        messages = value if isinstance(value, list) else json.loads(value)
+        messages = parse_messages(value)
         return tokenizer.apply_chat_template(
             messages, tokenize=True, add_generation_prompt=True,
             enable_thinking=args.enable_thinking,
@@ -111,7 +127,10 @@ def main() -> None:
     parser.add_argument("--chat", action="store_true", help="--prompt-field holds a chat messages list (or JSON string of one)")
     parser.add_argument("--chat-wrap", action="store_true", help="--prompt-field holds a raw string; wrap it as a single user turn via the chat template (use for gsm8k-style plain-text prompts on a chat/instruct base)")
     parser.add_argument("--enable-thinking", action="store_true", default=False)
-    parser.add_argument("--domain", required=True, help="fixed domain label written onto every row of this bank")
+    parser.add_argument("--domain", default=None, help="fixed domain label written onto every row of this bank; "
+                         "if omitted, uses the source dataset's own 'domain' column (required if it has none)")
+    parser.add_argument("--filter-domain", default=None, help="keep only source rows whose own 'domain' column "
+                         "equals this value (applied before --domain, which still overrides what gets *written*)")
     parser.add_argument("--num-prompts", type=int, default=128)
     parser.add_argument("--max-new-tokens", type=int, default=1024)
     parser.add_argument("--temperature", type=float, default=1.0)
@@ -128,6 +147,13 @@ def main() -> None:
     if args.dry_run:
         print(json.dumps({k: (v if not isinstance(v, (list, dict)) else str(v)[:500]) for k, v in rows[0].items()}, indent=2, default=str))
         return
+
+    if args.filter_domain:
+        before = len(rows)
+        rows = [r for r in rows if r.get("domain") == args.filter_domain]
+        print(f"--filter-domain {args.filter_domain!r}: kept {len(rows)}/{before} candidates", flush=True)
+    if args.domain is None and "domain" not in rows[0]:
+        raise ValueError("Source has no 'domain' column and --domain was not given; pass --domain to label this bank.")
 
     random.Random(args.seed).shuffle(rows)
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
@@ -170,7 +196,7 @@ def main() -> None:
                 "selected_positions": positions,
                 "selected_index": selected_index,
                 "prompt_sha256": sha256(prompt_ids),
-                "domain": args.domain,
+                "domain": args.domain if args.domain is not None else row["domain"],
                 "completion_length": len(completion_ids),
             })
             if len(kept) >= args.num_prompts:
