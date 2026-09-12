@@ -9,12 +9,12 @@
   "banks": {
     "bank_a": {
       "path": "/mnt/L202500431/orbit/tools/function_space/banks/bank_a_openreasoning",
-      "teacher_cache": "/mnt/L202500431/orbit/tools/function_space/output/cache/teacher/bank_a.npy",
+      "teacher_cache": null,
       "historical_base_npz": null
     },
     "bank_b": {
       "path": "/mnt/L202500431/orbit/tools/function_space/banks/bank_b_gsm8k",
-      "teacher_cache": "/mnt/L202500431/orbit/tools/function_space/output/cache/teacher/bank_b.npy",
+      "teacher_cache": null,
       "historical_base_npz": null
     }
   },
