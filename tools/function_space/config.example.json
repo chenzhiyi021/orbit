@@ -25,7 +25,9 @@
     "M6-FullFT-orbit": "/mnt/L202500431/models/zh_models/m6_st_full_non_thinking_hf_step300",
     "M6-HaarV8-orbit": "/mnt/L202500431/models/zh_models/m6_st_fullft_haarspace_v8_non_thinking_hf_step300",
     "M6-SubspaceV16-orbit": "/mnt/L202500431/models/zh_models/m6_st_fullft_subspace_v16_non_thinking_hf_step300",
-    "M6-SubspaceV8-orbit": "/mnt/L202500431/models/zh_models/m6_st_fullft_subspace_v8_non_thinking_hf_step300"
+    "M6-SubspaceV8-orbit": "/mnt/L202500431/models/zh_models/m6_st_fullft_subspace_v8_non_thinking_hf_step300",
+    "M6-LoRA-orbit": "/mnt/L202500431/models/zh_models/m6_st_lora_non_thinking_hf_step300",
+    "M6-OFT-orbit": "/mnt/L202500431/models/zh_models/m6_st_oft_non_thinking_hf_step300"
   },
   "checkpoint_steps": {
     "M6-FullFT-trl": 300,
@@ -34,6 +36,8 @@
     "M6-FullFT-orbit": 300,
     "M6-HaarV8-orbit": 300,
     "M6-SubspaceV16-orbit": 300,
-    "M6-SubspaceV8-orbit": 300
+    "M6-SubspaceV8-orbit": 300,
+    "M6-LoRA-orbit": 300,
+    "M6-OFT-orbit": 300
   }
 }
