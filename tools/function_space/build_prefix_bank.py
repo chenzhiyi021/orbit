@@ -140,6 +140,10 @@ def main() -> None:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--output", required=True)
     parser.add_argument("--dry-run", action="store_true", help="load the prompt source, print row 0, and exit -- no model load, no generation")
+    parser.add_argument("--print-samples", type=int, default=0,
+                         help="decode and print the prompt + generated completion for the first N kept rows "
+                              "(and whether they were long enough to keep, for dropped rows too) -- use this for "
+                              "a smoke test before spending time/tokens on a full run")
     args = parser.parse_args()
 
     rows = load_prompt_rows(args)
@@ -163,6 +167,7 @@ def main() -> None:
     ).eval().requires_grad_(False).to(args.device)
 
     kept: list[dict] = []
+    printed = 0
     torch.manual_seed(args.seed)
     for start in range(0, len(rows), args.batch_size):
         if len(kept) >= args.num_prompts:
@@ -187,6 +192,14 @@ def main() -> None:
             if tokenizer.eos_token_id is not None and tokenizer.eos_token_id in completion_ids:
                 completion_ids = completion_ids[: completion_ids.index(tokenizer.eos_token_id)]
             positions = normalized_positions_primary(len(completion_ids))
+            if printed < args.print_samples:
+                printed += 1
+                prompt_text = tokenizer.decode(prompt_ids, skip_special_tokens=False)
+                completion_text = tokenizer.decode(completion_ids, skip_special_tokens=False)
+                status = "KEPT" if positions else f"DROPPED (completion={len(completion_ids)} tokens, need >=64)"
+                print(f"\n{'=' * 80}\n[{printed}/{args.print_samples}] {status}\n"
+                      f"--- prompt (decoded, includes chat-template special tokens) ---\n{prompt_text}\n"
+                      f"--- completion ({len(completion_ids)} tokens) ---\n{completion_text}\n{'=' * 80}", flush=True)
             if not positions:
                 continue
             selected_index = len(kept)
