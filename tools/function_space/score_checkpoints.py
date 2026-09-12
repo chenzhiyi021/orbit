@@ -173,8 +173,12 @@ def main() -> None:
     base_noise_gate(out, bank_cfg.get("historical_base_npz"))
 
     for label, checkpoint in config["checkpoints"].items():
-        score_one(label, checkpoint, bank_info=bank_info, dataset=dataset, teacher_logits=teacher_logits,
-                  out=out, base_config=base_config, config=config, relative=True, step=config.get("checkpoint_steps", {}).get(label, 300))
+        step = config.get("checkpoint_steps", {}).get(label, 300)
+        # on-disk filename must carry "_step<NNN>" -- plot_cosine_heatmap.py's
+        # run auto-discovery (and relations.Record's FILE_RE) both key off it.
+        score_one(f"{label}_step{step:03d}", checkpoint, bank_info=bank_info, dataset=dataset,
+                  teacher_logits=teacher_logits, out=out, base_config=base_config, config=config,
+                  relative=True, step=step)
 
     (out / "COMPLETE.json").write_text(json.dumps({"bank": args.bank, "gate_pass": True}, indent=2) + "\n")
 
