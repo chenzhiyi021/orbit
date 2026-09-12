@@ -1,0 +1,33 @@
+{
+  "base_model": "/mnt/L202500431/models/qwen3-1.7b",
+  "sketch_dimension": 1024,
+  "batch_size": 2,
+  "exact_positions": 16,
+  "teacher_temperature": 0.7,
+  "bootstrap_seed": 20260826,
+  "output_root": "/mnt/L202500431/orbit/tools/function_space/output",
+  "banks": {
+    "bank_a": {
+      "path": "/mnt/L202500431/orbit/tools/function_space/banks/bank_a_openreasoning",
+      "teacher_cache": "/mnt/L202500431/orbit/tools/function_space/output/cache/teacher/bank_a.npy",
+      "historical_base_npz": null
+    },
+    "bank_b": {
+      "path": "/mnt/L202500431/orbit/tools/function_space/banks/bank_b_gsm8k",
+      "teacher_cache": "/mnt/L202500431/orbit/tools/function_space/output/cache/teacher/bank_b.npy",
+      "historical_base_npz": null
+    }
+  },
+  "checkpoints": {
+    "M6-FullFT-trl": "/mnt/L202500431/models/hyy_models/m6_trl_fullft_non_thinking_step300",
+    "M6-CoordMaskOracle-trl": "/mnt/L202500431/models/hyy_models/m6_coord_mask_1p6pct_oracle_step300",
+    "M6-CoordMaskRandom-trl": "/mnt/L202500431/models/hyy_models/m6_coord_mask_1p6pct_random_step300",
+    "M6-FullFT-orbit": "/mnt/L202500431/models/zh_models/m6_st_full_non_thinking_hf_step300"
+  },
+  "checkpoint_steps": {
+    "M6-FullFT-trl": 300,
+    "M6-CoordMaskOracle-trl": 300,
+    "M6-CoordMaskRandom-trl": 300,
+    "M6-FullFT-orbit": 300
+  }
+}
