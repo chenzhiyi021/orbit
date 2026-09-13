@@ -165,6 +165,24 @@ def validate(validator_cmd: str, checkpoint_dir: Path) -> float:
     return parse_validator_score(result.stdout)
 
 
+def megatron_iteration_for(step_count: int) -> int:
+    """Map "N real optimizer steps completed since the true start" to the
+    0-indexed `iteration` label this orbit/Megatron stack actually saves
+    checkpoints under.
+
+    Confirmed empirically, not assumed: segment n=0 (MEGATRON_LOAD=the
+    untouched pretrained base, NUM_ROLLOUT=1) saved its checkpoint as
+    `iteration 0` ("saving checkpoint at iteration 0" in the training log),
+    not `iteration 1` as this script originally assumed -- i.e. after N
+    steps the label is N-1, not N. This also retroactively explains why the
+    already-existing lr-sweep runs (--save-interval 2, 20 steps) saved at
+    iter_0000001, iter_0000003, ..., iter_0000019 (odd, 0-indexed) rather
+    than the even 1-indexed iter_0000002, iter_0000004, ..., iter_0000020
+    one might have guessed.
+    """
+    return step_count - 1
+
+
 def build_trigger_schedule(total_steps: int) -> list[int]:
     triggers = []
     n = 0
@@ -319,7 +337,7 @@ def main() -> None:
             segment_dir=segment_dir,
             megatron_load=accepted_megatron_load,
             num_rollout=num_rollout,
-            expected_end_iteration=t,
+            expected_end_iteration=megatron_iteration_for(t),
             wandb_group=wandb_group,
         )
         manifest_segments.append({"n": n, "start_iteration": accepted_iteration, "end_iteration": t, "num_rollout": num_rollout, "save_dir": str(segment_dir)})
@@ -338,7 +356,7 @@ def main() -> None:
         accepted_hf_dir = Path(result["accepted_hf_dir"])
         accepted_megatron_load = materialize_accepted_checkpoint(
             hf_dir=accepted_hf_dir,
-            target_iteration=t,
+            target_iteration=megatron_iteration_for(t),
             accepted_root=accepted_megatron_root,
             python_bin=args.python_bin,
             orbit_root=args.orbit_root,
@@ -353,7 +371,7 @@ def main() -> None:
             segment_dir=segment_dir,
             megatron_load=accepted_megatron_load,
             num_rollout=num_rollout,
-            expected_end_iteration=args.total_steps,
+            expected_end_iteration=megatron_iteration_for(args.total_steps),
             wandb_group=wandb_group,
         )
         manifest_segments.append(

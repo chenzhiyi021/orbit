@@ -83,25 +83,34 @@ dataset/teacher for this study.
 
 ## What is genuinely unverified (read this before running for real)
 
-Unlike the post-hoc tools (whose only real unknown was "no GPU here to test
-with"), two of this script's mechanics could not be confirmed by reading
-code alone, because the deciding logic lives inside `megatron.bridge`, an
-external library this checkout doesn't fully expose:
+**Update from the first real run**: iteration numbering here is
+**0-indexed**, not 1-indexed as this script originally assumed — confirmed
+from an actual segment-1 log: `NUM_ROLLOUT=1` from the untouched pretrained
+base saved its checkpoint as `iteration 0`, not `iteration 1`. Fixed via
+`megatron_iteration_for(step_count) = step_count - 1`, applied everywhere a
+real "N steps completed" count gets turned into the iteration number this
+stack actually saves/loads under. This also retroactively explains the
+existing lr-sweep runs' odd-numbered checkpoints (`iter_0000001,
+iter_0000003, ..., iter_0000019` for a 20-step, save-every-2 run) that this
+tree next door had to work around with an "ordinal position" convention
+instead of raw iteration numbers.
+
+Two things are *still* unconfirmed by anything short of watching a real
+run, because the deciding logic lives inside `megatron.bridge`, an external
+library this checkout doesn't fully expose:
 
 1. **Does a checkpoint from `tools/convert_hf_to_torch_dist.py`, re-stamped
-   with a hand-written `iter_{t:07d}` directory name and
+   with a hand-written `iter_{t-1:07d}` directory name and
    `latest_checkpointed_iteration.txt`, actually make Megatron resume
    step-counting (and data-sampler shuffling, and `--save-interval`
-   bookkeeping) from iteration `t`?** `convert_hf_to_torch_dist.py` wraps
-   `megatron.bridge.AutoBridge.save_megatron_model`, written to produce a
-   *fresh-start* `MEGATRON_LOAD` (this repo's existing recipes only ever use
-   it that way, at iteration ~0) — it exposes no iteration argument, and its
-   on-disk layout was never previously something this repo needed to
-   inspect. `materialize_accepted_checkpoint()` handles the two layouts that
-   seemed plausible (flat `.metadata`, or an `iter_*/.metadata` subdir) and
-   self-checks only that the result *looks* like a valid `--load` target
-   structurally. It does not and cannot confirm Megatron accepts the
-   stamped iteration semantically.
+   bookkeeping) from that iteration?** The segment-1 evidence above confirms
+   the *numbering convention*, but segment 1 loaded the untouched pretrained
+   base, not something `materialize_accepted_checkpoint()` produced — the
+   HF->Megatron round-trip and hand-written tracker file are exercised for
+   the first time at the n=0 -> n=1 transition. `materialize_accepted_checkpoint()`
+   self-checks only that its output *looks* like a valid `--load` target
+   structurally; it cannot confirm Megatron accepts the stamped iteration
+   semantically.
 2. **Does `--no-save-optim --no-save-rng` (set in the launcher recipe) mean
    every segment boundary already resets Adam's moment estimates, live run
    or not?** Believed yes, from reading the recipe's own `CKPT_ARGS` — if
@@ -110,14 +119,14 @@ external library this checkout doesn't fully expose:
    uniformly whether or not extrapolation happened at a given boundary. Not
    independently confirmed against Megatron's loader behavior.
 
-**Before trusting a full run**: let `n=0` finish (one real optimizer step —
-cheap) and manually check the segment's wandb run / training log confirms
-it started from iteration 0 and the *next* segment's log confirms it
-resumed from iteration 1, not 0. If the second segment's log shows it
-restarting from 0 (or crashes on load), the fix belongs in
+**Before trusting a full run**: watch the n=0 -> n=1 transition specifically
+— the first segment that resumes from a `materialize_accepted_checkpoint()`
+output rather than the raw pretrained base. Confirm its training log shows
+`saving checkpoint at iteration       1` (not `0` again) after that segment.
+If it shows `0` again (or crashes on load), the fix belongs in
 `materialize_accepted_checkpoint()`'s layout-detection branch, per its
 docstring — stop there rather than let the step-budget silently drift
-across all five triggers.
+across the remaining triggers.
 
 ## Cost
 
