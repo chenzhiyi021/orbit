@@ -42,7 +42,7 @@ cluster's /mnt/L202500431/..., so only --validator-cmd is required):
     python tools/extrapolation/live_training/run_effopd_live_training.py \\
         --validator-cmd "python tools/extrapolation/validate_checkpoint.py \\
             --evalchemy-root /mnt/L202500431/third_party/evalchemy \\
-            --task aime24 --num-samples 50 --num-gpus 1 --eval-tp-size 1" \\
+            --task aime24 --num-samples 50 --num-gpus 2 --eval-tp-size 1" \\
         --live-root live_training_runs/effopd_lr_2e-6 \\
         --total-steps 20
 """

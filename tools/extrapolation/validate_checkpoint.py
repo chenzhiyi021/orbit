@@ -50,7 +50,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--task", default="aime24", choices=["aime24", "aime25", "amc23", "math500"])
     parser.add_argument("--num-samples", type=int, default=50, help="|Dv| (paper default: 50).")
     parser.add_argument("--n-sampling", type=int, default=1, help="Completions per example; 1 keeps Dv cheap.")
-    parser.add_argument("--num-gpus", type=int, default=1)
+    parser.add_argument("--num-gpus", type=int, default=2, help="Matches eval-math-evalchemy.sh's own default and this cluster's 2-GPU box.")
     parser.add_argument("--eval-tp-size", type=int, default=1)
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--grader", default="evalchemy", choices=["evalchemy", "orbit"])
