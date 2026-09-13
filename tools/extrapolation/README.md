@@ -24,6 +24,15 @@ selection) and `opd_posthoc_common.py` (`CheckpointTensorStore`).
 tool's "always diff against the real trained checkpoint" convention (see
 below).
 
+Everything above is **post-hoc**: it reads checkpoints a finished run
+already produced and never touches the trainer — no forward+backward, no
+optimizer step, ever, confirmed against every function in `checkpoint_io.py`.
+For an actual live-training integration (extrapolation results feed back
+into a real, running orbit training job and genuinely shorten it), see
+**[`live_training/`](live_training/README.md)** — a separate, much higher-
+blast-radius tool that launches real multi-GPU training segments, with its
+own README covering what's unverified before you run it for real.
+
 ## Default run: lr=2e-6
 
 Per the current extrapolation study, every script here defaults
