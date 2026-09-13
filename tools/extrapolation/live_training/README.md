@@ -35,9 +35,6 @@ study has been comparing against. Each segment is one full invocation of
 
 ```bash
 python tools/extrapolation/live_training/run_effopd_live_training.py \
-    --train-jsonl /path/to/openreasoning_mixed_100k/train_qa.parquet \
-    --teacher-hf-ckpt /path/to/hf_ckpts/Qwen3-4B-Instruct-2507 \
-    --evalchemy-root /mnt/L202500431/third_party/evalchemy \
     --validator-cmd "python tools/extrapolation/validate_checkpoint.py \
         --evalchemy-root /mnt/L202500431/third_party/evalchemy \
         --task aime24 --num-samples 50 --num-gpus 1 --eval-tp-size 1" \
@@ -45,17 +42,20 @@ python tools/extrapolation/live_training/run_effopd_live_training.py \
     --total-steps 20
 ```
 
-`--base-model` and `--megatron-base` default to
-`/mnt/L202500431/models/qwen3-1.7b` and `/mnt/L202500431/models/megatron_ckpt`
-respectively — the first is confirmed (same path you gave me for the
-post-hoc tools), the second is **a guess** from `ls ../models` showing a
-`megatron_ckpt` entry; **verify it actually holds a Megatron-converted
-Qwen3-1.7B before trusting it** (`ls` it, check for a config/args file that
-names the model). `--train-jsonl`, `--teacher-hf-ckpt`, `--evalchemy-root`
-have no default — this session cannot see your `/mnt/L202500431/...` layout
-well enough to guess those safely (the launcher script's own hardcoded
-defaults point at a *different* mount, `L202500430`, which is why the
-earlier post-hoc `--base-model` default was wrong until you corrected it).
+Every path arg now has a default confirmed against this cluster's actual
+layout (`ls ../models`, `ls ../models/megatron_ckpt`, `ls ../datasets`,
+`ls ../datasets/openreasoning_mixed_100k`):
+
+| flag | default |
+|---|---|
+| `--base-model` | `/mnt/L202500431/models/qwen3-1.7b` |
+| `--megatron-base` | `/mnt/L202500431/models/megatron_ckpt/qwen3-1.7b` |
+| `--train-jsonl` | `/mnt/L202500431/datasets/openreasoning_mixed_100k/train.parquet` |
+| `--teacher-hf-ckpt` | `/mnt/L202500431/models/qwen3-4b-instruct-2507` |
+| `--evalchemy-root` | `/mnt/L202500431/third_party/evalchemy` |
+
+Override any of them (`--train-jsonl`, etc.) if you want a different
+dataset/teacher for this study.
 
 ## What actually happens, mechanically
 

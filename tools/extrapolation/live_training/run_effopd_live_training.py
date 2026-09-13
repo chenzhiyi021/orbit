@@ -36,14 +36,10 @@ tool always diffs real checkpoints instead).
 *** cluster to test on. Segment 1 is cheap (one real step); let it finish
 *** and inspect its logs/wandb step count before trusting the rest of a run.
 
-Example (fill in the paths marked required; EVALCHEMY_ROOT/TRAIN_JSONL/
-OPD_TEACHER_CKPT are cluster paths this session could not confirm, unlike
---base-model/--megatron-base which were confirmed against `ls ../models`):
+Example (every path arg now defaults to a confirmed location under this
+cluster's /mnt/L202500431/..., so only --validator-cmd is required):
 
     python tools/extrapolation/live_training/run_effopd_live_training.py \\
-        --train-jsonl /path/to/openreasoning_mixed_100k/train_qa.parquet \\
-        --teacher-hf-ckpt /path/to/hf_ckpts/Qwen3-4B-Instruct-2507 \\
-        --evalchemy-root /mnt/L202500431/third_party/evalchemy \\
         --validator-cmd "python tools/extrapolation/validate_checkpoint.py \\
             --evalchemy-root /mnt/L202500431/third_party/evalchemy \\
             --task aime24 --num-samples 50 --num-gpus 1 --eval-tp-size 1" \\
@@ -87,14 +83,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--megatron-base",
         type=Path,
-        default=Path("/mnt/L202500431/models/megatron_ckpt"),
+        default=Path("/mnt/L202500431/models/megatron_ckpt/qwen3-1.7b"),
         help="Megatron-format version of --base-model, used as the first segment's MEGATRON_LOAD. "
-        "Default is a GUESS from `ls ../models` showing a `megatron_ckpt` entry -- verify it actually "
-        "holds Qwen3-1.7B (not some other model) before trusting this default.",
+        "Default confirmed via `ls ../models/megatron_ckpt` (qwen3-1.7b subdir present).",
     )
-    parser.add_argument("--train-jsonl", type=Path, required=True, help="Rollout prompt data (the launcher's TRAIN_JSONL).")
-    parser.add_argument("--teacher-hf-ckpt", type=Path, required=True, help="Teacher checkpoint (OPD_TEACHER_CKPT).")
-    parser.add_argument("--evalchemy-root", type=Path, required=True, help="Forwarded to the launcher's eval stage (unused; RUN_EVAL stays 0) and available for --validator-cmd to reference.")
+    parser.add_argument(
+        "--train-jsonl",
+        type=Path,
+        default=Path("/mnt/L202500431/datasets/openreasoning_mixed_100k/train.parquet"),
+        help="Rollout prompt data (the launcher's TRAIN_JSONL). Default confirmed via `ls ../datasets`.",
+    )
+    parser.add_argument(
+        "--teacher-hf-ckpt",
+        type=Path,
+        default=Path("/mnt/L202500431/models/qwen3-4b-instruct-2507"),
+        help="Teacher checkpoint (OPD_TEACHER_CKPT). Default confirmed via `ls ../models`.",
+    )
+    parser.add_argument(
+        "--evalchemy-root",
+        type=Path,
+        default=Path("/mnt/L202500431/third_party/evalchemy"),
+        help="Forwarded to the launcher's eval stage (unused; RUN_EVAL stays 0) and available for "
+        "--validator-cmd to reference. Default is what you've been passing to eval-math-evalchemy.sh.",
+    )
     parser.add_argument("--lr", default="2e-6", help="Constant LR for every segment (default matches this study's lr=2e-6 arm).")
     parser.add_argument("--total-steps", type=int, default=20, help="Total real optimizer steps across the whole live run.")
     parser.add_argument(
