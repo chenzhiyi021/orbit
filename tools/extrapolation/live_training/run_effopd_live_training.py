@@ -165,22 +165,40 @@ def validate(validator_cmd: str, checkpoint_dir: Path) -> float:
     return parse_validator_score(result.stdout)
 
 
-def megatron_iteration_for(step_count: int) -> int:
-    """Map "N real optimizer steps completed since the true start" to the
-    0-indexed `iteration` label this orbit/Megatron stack actually saves
-    checkpoints under.
+def local_iteration_for(num_rollout: int) -> int:
+    """Map "N real optimizer steps taken in THIS segment" to the iteration
+    label this stack saves that segment's checkpoint under.
 
-    Confirmed empirically, not assumed: segment n=0 (MEGATRON_LOAD=the
-    untouched pretrained base, NUM_ROLLOUT=1) saved its checkpoint as
-    `iteration 0` ("saving checkpoint at iteration 0" in the training log),
-    not `iteration 1` as this script originally assumed -- i.e. after N
-    steps the label is N-1, not N. This also retroactively explains why the
-    already-existing lr-sweep runs (--save-interval 2, 20 steps) saved at
-    iter_0000001, iter_0000003, ..., iter_0000019 (odd, 0-indexed) rather
-    than the even 1-indexed iter_0000002, iter_0000004, ..., iter_0000020
-    one might have guessed.
+    Confirmed empirically across two segments, not assumed: segment n=0
+    (MEGATRON_LOAD=the untouched pretrained base, NUM_ROLLOUT=1) saved at
+    `iteration 0`. Segment n=1 (MEGATRON_LOAD=this script's own
+    `materialize_accepted_checkpoint()` output, NUM_ROLLOUT=1) ALSO saved at
+    `iteration 0` -- not `iteration 1`, which is what a global/cumulative
+    step count would have predicted. The only hypothesis consistent with
+    both data points: iteration counting resets to 0 on every `--load`
+    (this repo's `--no-save-optim --no-save-rng` recipe setting makes every
+    checkpoint here a weights-only, finetune-style load, and Megatron's
+    classic finetune semantics ignore the stored iteration and start
+    counting from 0 again), so the saved label is local to THIS segment
+    only: (steps taken in this segment) - 1, not a running total across
+    segments. This also retroactively explains why the already-existing
+    lr-sweep runs (a single unbroken 20-step process, never stopped and
+    resumed) saved at iter_0000001, iter_0000003, ..., iter_0000019 (0-indexed
+    within that one continuous run).
+
+    Global step-budget accounting (how many total real steps has this live
+    run done) is tracked separately and correctly by this script's own
+    `accepted_iteration`/`num_rollout` bookkeeping in `main()` -- it never
+    depended on Megatron's own counter. Only the *directory name* to look
+    for on disk needed this fix.
+
+    See also the rollout-data-sampler caveat in README.md: the same
+    `--load` reset almost certainly also resets `RolloutDataSource`'s
+    epoch/sample position every segment (confirmed by reading
+    `orbit/rollout/data_source.py` and `orbit/ray/placement_group.py`), which
+    this fix does not address.
     """
-    return step_count - 1
+    return num_rollout - 1
 
 
 def build_trigger_schedule(total_steps: int) -> list[int]:
@@ -337,7 +355,7 @@ def main() -> None:
             segment_dir=segment_dir,
             megatron_load=accepted_megatron_load,
             num_rollout=num_rollout,
-            expected_end_iteration=megatron_iteration_for(t),
+            expected_end_iteration=local_iteration_for(num_rollout),
             wandb_group=wandb_group,
         )
         manifest_segments.append({"n": n, "start_iteration": accepted_iteration, "end_iteration": t, "num_rollout": num_rollout, "save_dir": str(segment_dir)})
@@ -354,9 +372,13 @@ def main() -> None:
         manifest_extrapolations.append(result)
 
         accepted_hf_dir = Path(result["accepted_hf_dir"])
+        # `target_iteration` no longer needs to predict what Megatron will do with it --
+        # local_iteration_for()'s finding says it resets to 0 on load regardless. Use `t`
+        # here purely so every trigger's staged checkpoint gets its own directory on disk
+        # (audit trail); see materialize_accepted_checkpoint()'s docstring.
         accepted_megatron_load = materialize_accepted_checkpoint(
             hf_dir=accepted_hf_dir,
-            target_iteration=megatron_iteration_for(t),
+            target_iteration=t,
             accepted_root=accepted_megatron_root,
             python_bin=args.python_bin,
             orbit_root=args.orbit_root,
@@ -371,7 +393,7 @@ def main() -> None:
             segment_dir=segment_dir,
             megatron_load=accepted_megatron_load,
             num_rollout=num_rollout,
-            expected_end_iteration=megatron_iteration_for(args.total_steps),
+            expected_end_iteration=local_iteration_for(num_rollout),
             wandb_group=wandb_group,
         )
         manifest_segments.append(

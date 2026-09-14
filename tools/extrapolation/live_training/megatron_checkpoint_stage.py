@@ -40,11 +40,18 @@ def materialize_accepted_checkpoint(
     python_bin: str,
     orbit_root: Path,
 ) -> Path:
-    """Convert `hf_dir` to Megatron format, stamped as iteration `target_iteration`,
-    under the shared `accepted_root` directory (one `iter_*` subdir per accepted
-    checkpoint across the whole live run, so every segment's starting point stays
-    on disk for audit). Returns `accepted_root` -- pass this straight through as
-    the next segment's `MEGATRON_LOAD`.
+    """Convert `hf_dir` to Megatron format under `accepted_root/iter_{target_iteration:07d}`
+    (one subdir per accepted checkpoint across the whole live run, so every
+    segment's starting point stays on disk for audit). Returns `accepted_root`
+    -- pass this straight through as the next segment's `MEGATRON_LOAD`.
+
+    `target_iteration` is now known to be cosmetic, not functional: a real
+    two-segment run showed Megatron resets its iteration counter to 0 on
+    every `--load` in this recipe regardless of what's stamped here (see
+    `run_effopd_live_training.py`'s `local_iteration_for()` docstring for the
+    evidence). Callers pass `t` (the paper's step-count `t`, not a Megatron
+    iteration) purely so each trigger's staged checkpoint lands in its own
+    directory instead of colliding.
     """
     accepted_root.mkdir(parents=True, exist_ok=True)
     raw_output = accepted_root / f"_raw_import_iter{target_iteration:07d}"

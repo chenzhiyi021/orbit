@@ -83,50 +83,57 @@ dataset/teacher for this study.
 
 ## What is genuinely unverified (read this before running for real)
 
-**Update from the first real run**: iteration numbering here is
-**0-indexed**, not 1-indexed as this script originally assumed — confirmed
-from an actual segment-1 log: `NUM_ROLLOUT=1` from the untouched pretrained
-base saved its checkpoint as `iteration 0`, not `iteration 1`. Fixed via
-`megatron_iteration_for(step_count) = step_count - 1`, applied everywhere a
-real "N steps completed" count gets turned into the iteration number this
-stack actually saves/loads under. This also retroactively explains the
-existing lr-sweep runs' odd-numbered checkpoints (`iter_0000001,
-iter_0000003, ..., iter_0000019` for a 20-step, save-every-2 run) that this
-tree next door had to work around with an "ordinal position" convention
-instead of raw iteration numbers.
+**Update from a real two-segment run**: iteration counting **resets to 0 on
+every `--load`** in this recipe, full stop — it is not a running total
+across segments (confirmed, not assumed: segment n=0, from the untouched
+pretrained base, NUM_ROLLOUT=1, saved at `iteration 0`; segment n=1, from
+this script's own `materialize_accepted_checkpoint()` output, ALSO
+NUM_ROLLOUT=1, saved at `iteration 0` again — a global/cumulative counter
+would have predicted `1`). Almost certainly because `--no-save-optim
+--no-save-rng` (set in the launcher recipe) makes every checkpoint here a
+weights-only, finetune-style load, and Megatron's classic finetune
+semantics ignore the stored iteration and restart counting at 0. Fixed via
+`local_iteration_for(num_rollout) = num_rollout - 1`, which this script's
+own `accepted_iteration` bookkeeping (a plain Python variable, never
+dependent on Megatron's counter) turns into the correct real step budget
+regardless. See `local_iteration_for()`'s docstring for the full account.
 
-Two things are *still* unconfirmed by anything short of watching a real
-run, because the deciding logic lives inside `megatron.bridge`, an external
-library this checkout doesn't fully expose:
+**A more serious, related, and still-open finding from reading orbit's own
+source** (not yet observed directly, but the code is unambiguous):
+`orbit/rollout/data_source.py`'s `RolloutDataSource` tracks which prompts
+have been consumed (`epoch_id`, `sample_offset`) in a *separate* file,
+`<save>/rollout/global_dataset_state_dict_{rollout_id}.pt`, loaded via
+`orbit/ray/placement_group.py:208`'s `rollout_manager.load(...)`.
+`materialize_accepted_checkpoint()` only ever writes Megatron DCP weights —
+it never produces this file. Combined with the iteration-reset behavior
+above, **every segment almost certainly restarts the rollout data sampler
+from the same shuffled position** (`epoch_id=0, sample_offset=0`, same fixed
+`--rollout-seed`) rather than continuing on to unseen prompts, meaning a
+6-segment live run may repeatedly train on overlapping/identical prompt
+batches rather than genuinely advancing through the corpus 20 steps' worth.
+This is a **pre-existing property of orbit's stop-and-resume mechanism**,
+not something this tool's extrapolation logic introduces — any workflow
+that stops and restarts training via `--load` in this codebase would hit
+it. It was not chased down further (would mean copying/renaming
+`<segment_dir>/rollout/global_dataset_state_dict_*.pt` into
+`accepted_megatron_root` with a filename `local_iteration_for()`'s finding
+implies the *next* segment will look for, which is inferred, not confirmed,
+from `orbit/backends/megatron_utils/actor.py:222`'s
+`start_rollout_id = loaded_rollout_id + 1` combined with
+`orbit/utils/arguments.py:3545`'s `args.start_rollout_id = 0` default —
+plausible that `start_rollout_id` never gets updated from `loaded_rollout_id`
+in this code path at all, which would be a second, independent reason for
+the same symptom). **Decide explicitly whether repeated/overlapping prompt
+batches are acceptable for this exploratory pass before reading too much
+into a full run's final accuracy** — the step *count* will be right, the
+data *diversity* behind those steps may not be.
 
-1. **Does a checkpoint from `tools/convert_hf_to_torch_dist.py`, re-stamped
-   with a hand-written `iter_{t-1:07d}` directory name and
-   `latest_checkpointed_iteration.txt`, actually make Megatron resume
-   step-counting (and data-sampler shuffling, and `--save-interval`
-   bookkeeping) from that iteration?** The segment-1 evidence above confirms
-   the *numbering convention*, but segment 1 loaded the untouched pretrained
-   base, not something `materialize_accepted_checkpoint()` produced — the
-   HF->Megatron round-trip and hand-written tracker file are exercised for
-   the first time at the n=0 -> n=1 transition. `materialize_accepted_checkpoint()`
-   self-checks only that its output *looks* like a valid `--load` target
-   structurally; it cannot confirm Megatron accepts the stamped iteration
-   semantically.
-2. **Does `--no-save-optim --no-save-rng` (set in the launcher recipe) mean
-   every segment boundary already resets Adam's moment estimates, live run
-   or not?** Believed yes, from reading the recipe's own `CKPT_ARGS` — if
-   so, this is a *pre-existing* property of the recipe's checkpointing
-   choice, not something this script uniquely introduces, and it applies
-   uniformly whether or not extrapolation happened at a given boundary. Not
-   independently confirmed against Megatron's loader behavior.
-
-**Before trusting a full run**: watch the n=0 -> n=1 transition specifically
-— the first segment that resumes from a `materialize_accepted_checkpoint()`
-output rather than the raw pretrained base. Confirm its training log shows
-`saving checkpoint at iteration       1` (not `0` again) after that segment.
-If it shows `0` again (or crashes on load), the fix belongs in
-`materialize_accepted_checkpoint()`'s layout-detection branch, per its
-docstring — stop there rather than let the step-budget silently drift
-across the remaining triggers.
+**Before trusting a full run**: watch training logs for whether each
+segment's rollout prompts actually differ (or log a hash/first-token of the
+batch per segment and diff them) rather than just checking the checkpoint's
+iteration label — the label is now expected to always read `0`;
+back-to-back segments training on identical batches is the thing actually
+worth catching.
 
 ## Cost
 
