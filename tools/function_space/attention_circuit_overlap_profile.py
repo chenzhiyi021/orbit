@@ -30,9 +30,15 @@ checkpoints should be measuring.
 GQA is handled: kv(h) = h // (num_attention_heads // num_key_value_heads),
 read from the base checkpoint's config.json.
 
+--compare-base additionally compares each checkpoint's Delta(C^h) with the
+base circuit C^h(base) itself (pair label "W_base"; see subspace_overlap_
+profile.py for why). A per-head circuit has rank <= head_dim, so its singular
+directions past head_dim are an arbitrary null-space basis; those k are
+skipped for the W_base rows.
+
 This file does not modify, and only imports from, svd_rank_profile.py
 (``load_tensor``, ``tensor_locations``) and subspace_overlap_profile.py
-(``top_k_bases``, ``subspace_sim``, ``empirical_chance``). Neither of those
+(``top_k_bases``, ``subspace_sim``, ``format_sim_line``). Neither of those
 files is touched.
 
 CPU-only. Each circuit is (hidden_size, hidden_size) -- the same size as the
@@ -47,7 +53,7 @@ Usage:
         --checkpoint random=/mnt/L202500431/models/hyy_models/m6_coord_mask_1p6pct_random_step300 \\
         --checkpoint fullft=/mnt/L202500431/models/hyy_models/m6_trl_fullft_non_thinking_step300 \\
         --layers auto --heads auto --circuits qk,ov \\
-        --k 1,2,4,8,16,32,64,128,256 --random-trials 20
+        --k 1,2,4,8,16,32,64,128,256 [--compare-base]
 """
 from __future__ import annotations
 
@@ -58,7 +64,7 @@ from pathlib import Path
 
 import torch
 
-from subspace_overlap_profile import empirical_chance, subspace_sim, top_k_bases
+from subspace_overlap_profile import BASE_W_NAME, format_sim_line, subspace_sim, top_k_bases
 from svd_rank_profile import load_tensor, tensor_locations
 
 
@@ -115,17 +121,19 @@ def main() -> None:
     parser.add_argument("--heads", default="auto", help="comma-separated query-head indices, 'auto' (first/mid/last), or 'all'")
     parser.add_argument("--circuits", default="qk,ov", help="comma-separated subset of {qk, ov}")
     parser.add_argument("--k", default="1,2,4,8,16,32,64,128,256", help="comma-separated top-k values to test")
-    parser.add_argument("--random-trials", type=int, default=20,
-                         help="independent Haar-random subspace pairs sampled per (n, k) for the empirical chance baseline")
-    parser.add_argument("--seed", type=int, default=20260907)
+    parser.add_argument("--compare-base", action="store_true",
+                         help=f"also compare each checkpoint's circuit delta with the base circuit's own top-k "
+                              f"singular subspace (pair label '{BASE_W_NAME}')")
     args = parser.parse_args()
 
     checkpoints = {}
     for item in args.checkpoint:
         name, _, path = item.partition("=")
         checkpoints[name] = Path(path)
-    if len(checkpoints) < 2:
-        raise ValueError("Need >=2 --checkpoint entries to compare pairwise")
+    if BASE_W_NAME in checkpoints:
+        raise ValueError(f"--checkpoint name '{BASE_W_NAME}' is reserved for --compare-base rows")
+    if len(checkpoints) < (1 if args.compare_base else 2):
+        raise ValueError("Need >=2 --checkpoint entries to compare pairwise (or >=1 with --compare-base)")
 
     circuits_wanted = [c.strip() for c in args.circuits.split(",") if c.strip()]
     assert all(c in ("qk", "ov") for c in circuits_wanted), circuits_wanted
@@ -136,12 +144,10 @@ def main() -> None:
     heads = parse_indices(args.heads, cfg["num_heads"])
     print(f"config: {cfg}", flush=True)
     print(f"layers={layers} heads={heads} circuits={circuits_wanted} k={k_values} "
-          f"{args.random_trials} random-baseline trials each\n", flush=True)
+          f"analytic chance baseline\n", flush=True)
 
     base_locations = tensor_locations(args.base)
     ckpt_locations = {name: tensor_locations(path) for name, path in checkpoints.items()}
-    generator = torch.Generator().manual_seed(args.seed)
-    chance_cache: dict[tuple[int, int], tuple[float, float]] = {}
 
     for layer in layers:
         base_qkvo = load_qkvo(args.base, base_locations, layer)
@@ -157,23 +163,19 @@ def main() -> None:
                     deltas[name] = c - base_c
                 bases = {name: top_k_bases(delta, k_values) for name, delta in deltas.items()}
                 n_dim = base_c.shape[0]  # square (hidden, hidden)
-                for left_name, right_name in itertools.combinations(checkpoints, 2):
+                pairs = list(itertools.combinations(checkpoints, 2))
+                if args.compare_base:
+                    bases[BASE_W_NAME] = top_k_bases(base_c, k_values)
+                    pairs += [(name, BASE_W_NAME) for name in checkpoints]
+                for left_name, right_name in pairs:
+                    k_max = cfg["head_dim"] if right_name == BASE_W_NAME else n_dim
                     print(f"  -- {circuit_name} {left_name} vs {right_name} --")
                     for side in ("left", "right"):
                         for k in k_values:
-                            if k > n_dim:
+                            if k > k_max:
                                 continue
                             sim = subspace_sim(bases[left_name][side][k], bases[right_name][side][k])
-                            cache_key = (n_dim, k)
-                            if cache_key not in chance_cache:
-                                chance_cache[cache_key] = empirical_chance(n_dim, k, args.random_trials, generator)
-                            chance_mean, chance_std = chance_cache[cache_key]
-                            asymptotic = (k / n_dim) ** 0.5
-                            multiple = sim / chance_mean if chance_mean > 1e-12 else float("nan")
-                            print(f"    {side:<5} k={k:<4} sim_k={sim:.4f}  "
-                                  f"chance_empirical={chance_mean:.4f}+/-{chance_std:.4f}  "
-                                  f"chance_asymptotic_sqrt(k/n)={asymptotic:.4f}  "
-                                  f"observed/chance={multiple:.2f}x")
+                            print(format_sim_line(side, k, sim, n_dim))
             print()
 
 

@@ -38,16 +38,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
 
+# Per-k data lines share one format with subspace_overlap_profile.py's logs.
+from plot_tensor_subspace_overlap import parse_sim_line
 
 HEADER_RE = re.compile(r"^=== layer (\d+), head (\d+) \(kv_head (\d+)\) ===\s*$")
 PAIR_RE = re.compile(r"^\s*-- (\S+) (\S+) vs (\S+) --\s*$")
-NUM = r"(nan|[-\d.]+)"
-DATA_RE = re.compile(
-    rf"^\s*(left|right)\s+k=(\d+)\s+sim_k={NUM}\s+"
-    rf"chance_empirical={NUM}\+/-{NUM}\s+"
-    rf"chance_asymptotic_sqrt\(k/n\)={NUM}\s+"
-    rf"observed/chance={NUM}x\s*$"
-)
 
 
 def parse_log(path: Path) -> pd.DataFrame:
@@ -63,17 +58,12 @@ def parse_log(path: Path) -> pd.DataFrame:
         if pair:
             circuit, left, right = pair.groups()
             continue
-        data = DATA_RE.match(line)
+        data = parse_sim_line(line)
         if data:
             if layer is None or circuit is None:
                 raise ValueError(f"data line appeared before any layer/pair header in {path}: {line!r}")
-            side, k, sim_k, chance_mean, chance_std, chance_asym, multiple = data.groups()
-            rows.append(dict(
-                layer=layer, head=head, kv_head=kv_head, circuit=circuit,
-                left=left, right=right, side=side, k=int(k), sim_k=float(sim_k),
-                chance_empirical=float(chance_mean), chance_std=float(chance_std),
-                chance_asymptotic=float(chance_asym), observed_over_chance=float(multiple),
-            ))
+            rows.append(dict(layer=layer, head=head, kv_head=kv_head, circuit=circuit,
+                             left=left, right=right, **data))
     if not rows:
         raise ValueError(f"No data rows parsed from {path} -- is this a saved "
                           f"attention_circuit_overlap_profile.py transcript (stdout captured with tee/> )?")
@@ -104,7 +94,8 @@ def plot_circuit(frame: pd.DataFrame, circuit: str, output_path: Path) -> None:
     ax.set_xticks(ks)
     ax.set_xticklabels([str(k) for k in ks])
     ax.set_xlabel("Top-k singular vectors")
-    ax.set_ylabel("Mean sim_k across (layer, head) circuits")
+    metric_label = "||Q^T Q'||_F^2 / k" if subset.metric.iloc[0] == "phi" else "||Q^T Q'||_F / sqrt(k)"
+    ax.set_ylabel(f"Mean sim_k = {metric_label} across (layer, head) circuits")
     n_tensors = subset[["layer", "head"]].drop_duplicates().shape[0]
     ax.set_title(f"{circuit.upper()} circuit: top singular subspace similarity across model pairs\n"
                  f"(mean ± 1 std across {n_tensors} (layer, head) tensors)")
@@ -125,6 +116,10 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     frame = pd.concat([parse_log(p) for p in args.log], ignore_index=True)
+    metrics = sorted(frame.metric.unique())
+    if len(metrics) > 1:
+        raise ValueError(f"Refusing to merge logs with different sim_k definitions {metrics}: "
+                         f"legacy logs use ||.||_F/sqrt(k), current logs use ||.||_F^2/k. Re-run the old ones.")
     csv_path = args.output_dir / "parsed_attention_circuit_overlap.csv"
     frame.to_csv(csv_path, index=False)
     print(f"parsed {len(frame)} rows from {len(args.log)} log file(s) -> {csv_path}; "
