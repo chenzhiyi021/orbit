@@ -10,14 +10,14 @@ Run in an environment with sglang + transformers + a GPU (e.g. orbit_env_v2):
 
     python tools/ifeval/generate_ifeval_responses.py \\
         --model /mnt/L202500431/models/qwen3-1.7b \\
-        --output /mnt/L202500431/ifeval_runs/qwen3-1.7b/responses.jsonl
+        --output /mnt/L202500431/google-research/ifeval_runs/qwen3-1.7b/responses.jsonl
 
 then grade in the grader's environment (e.g. ifeval_env), from the google-research dir:
 
     python -m instruction_following_eval.evaluation_main \\
         --input_data=./instruction_following_eval/data/input_data.jsonl \\
-        --input_response_data=/mnt/L202500431/ifeval_runs/qwen3-1.7b/responses.jsonl \\
-        --output_dir=/mnt/L202500431/ifeval_runs/qwen3-1.7b
+        --input_response_data=./ifeval_runs/qwen3-1.7b/responses.jsonl \\
+        --output_dir=./ifeval_runs/qwen3-1.7b
 """
 from __future__ import annotations
 

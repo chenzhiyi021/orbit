@@ -82,7 +82,7 @@ source "${ORBIT_ROOT}/orbit_plugins/model_args/qwen3-1.7B.sh"   # provides MODEL
 # === Training schedule ===
 # rollout_batch_size x n_samples_per_prompt equals global_batch_size, so one rollout is
 # exactly one optimizer step and NUM_ROLLOUT is the step count.
-NUM_ROLLOUT="${NUM_ROLLOUT:-50}"
+NUM_ROLLOUT="${NUM_ROLLOUT:-300}"
 ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-256}"
 N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-1}"
 GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-256}"
@@ -95,7 +95,7 @@ CKPT_ARGS=(
     --hf-checkpoint "${HF_CKPT}"
     --load "${MEGATRON_LOAD}"
     --save "${SAVE_DIR}"
-    --save-interval "${SAVE_INTERVAL:-10}"
+    --save-interval "${SAVE_INTERVAL:-30}"
     --no-save-optim
     --no-save-rng
     --megatron-to-hf-mode bridge
