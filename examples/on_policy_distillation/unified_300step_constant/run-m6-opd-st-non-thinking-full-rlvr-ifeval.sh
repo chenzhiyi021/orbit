@@ -22,7 +22,11 @@
 # ground_truth / constraint columns are unused here (they are what you would grade
 # against when evaluating).
 #
-# 50 steps x 256 prompts = 12,800 prompts < 15,000 rows, so no prompt is seen twice.
+# 300 steps x 256 prompts = 76,800 prompts over 15,000 rows, i.e. ~5.1 epochs: each
+# prompt is sampled ~5 times (reshuffled every epoch by orbit/rollout/data_source.py).
+# The openreasoning run sees ~100k distinct prompts over the same 300 steps, so this
+# control repeats its prompts where that run does not -- keep that in mind when
+# comparing the two deltas.
 #
 # Evaluation is not wired in: the openreasoning recipe's eval is math-only. Score the
 # checkpoints on IFEval (lm-eval task `ifeval`) or IFBench separately.
@@ -40,7 +44,7 @@ source "${ORBIT_ROOT}/scripts/lib/tool_env.sh"
 source "${ORBIT_ROOT}/scripts/lib/common.sh"
 
 # === Recipe identity ===
-LAUNCHER_NAME=m6_opd_st_full_non_thinking_rlvr_ifeval_50step
+LAUNCHER_NAME=m6_opd_st_full_non_thinking_rlvr_ifeval_300step
 WANDB_PROJECT=${WANDB_PROJECT:-orbit-adapt}
 WANDB_GROUP=${WANDB_GROUP:-${LAUNCHER_NAME}}
 PRECISION_PROFILE=bf16
@@ -90,7 +94,7 @@ GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-256}"
 # === ARGS arrays ===
 COLOCATE_ARGS=( --colocate )
 
-# Checkpoint every 10 steps -> 5 checkpoints (iter 9, 19, 29, 39, 49; 0-indexed).
+# Checkpoint every 30 steps -> 10 checkpoints (iter 29, 59, ..., 299; 0-indexed).
 CKPT_ARGS=(
     --hf-checkpoint "${HF_CKPT}"
     --load "${MEGATRON_LOAD}"
