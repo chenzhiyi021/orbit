@@ -11,13 +11,17 @@ one regex set for both.
 
 Groups tensors by "kind" -- the second-to-last dot-separated component of
 the tensor name before ".weight" (e.g. "down_proj", "gate_proj") -- and
-produces one figure per kind, analogous to one figure per circuit in the
-attention script. Each figure: one line per (left, right, side) triple,
-x = top-k (log2 scale), y = mean sim_k across every tensor of that kind
-found in the log (e.g. across all layers' down_proj), shaded band = +/- 1
-std across those tensors.
-
-Does not modify subspace_overlap_profile.py.
+produces, per kind:
+  - {kind}_subspace_overlap.png: one panel per side (left = output space,
+    right = input space; their chance levels k/n differ). One line per model
+    pair, x = top-k (log2 scale), y = median sim_k across every tensor of that
+    kind found in the log (e.g. across all layers' down_proj), shaded band =
+    25-75% across those tensors, dashed black = uniform-random chance k/n.
+  - {kind}_{A}_vs_{B}_layers.png, per pair: layer x k heatmap of
+    log10(observed/chance), so a single anomalous layer (hidden by the layer
+    mean above) stands out. Skipped when the log has only one layer.
+Summary lines ("mean_sim_k=...") in the log are ignored; the plots recompute
+the layer statistics from the per-tensor lines.
 
 Usage:
     python plot_tensor_subspace_overlap.py \\
@@ -34,7 +38,9 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
+from matplotlib.colors import TwoSlopeNorm
 
 
 HEADER_RE = re.compile(r"^=== (\S+)\s+\(shape \(([^)]*)\)\) ===\s*$")
@@ -116,37 +122,78 @@ def parse_log(path: Path) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+SIDE_TITLES = {"left": "left singular vectors (output space)", "right": "right singular vectors (input space)"}
+
+
 def plot_kind(frame: pd.DataFrame, kind: str, output_path: Path) -> None:
+    """One panel per side (their chance levels differ): median sim_k over layers vs k, one line per
+    pair, interquartile band across layers, and the uniform-random chance level k/n dashed.
+    Median/IQR rather than mean/std: one anomalous layer inflates the std into a band that
+    dips below 0 (sim_k cannot); single layers are what plot_layer_heatmap is for."""
     subset = frame[frame.kind == kind]
     pairs = list(subset[["left", "right"]].drop_duplicates().itertuples(index=False, name=None))
-    fig, ax = plt.subplots(figsize=(10, 6))
     colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
-    color_index = 0
-    for left, right in pairs:
-        for side in ("left", "right"):
-            line = subset[(subset.left == left) & (subset.right == right) & (subset.side == side)]
+    pair_color = {pair: colors[i % len(colors)] for i, pair in enumerate(pairs)}
+    fig, axes = plt.subplots(1, 2, figsize=(15, 5.5), sharey=True)
+    ks = sorted(subset.k.unique())
+    for ax, side in zip(axes, ("left", "right")):
+        side_rows = subset[subset.side == side]
+        for pair in pairs:
+            line = side_rows[(side_rows.left == pair[0]) & (side_rows.right == pair[1])]
             if line.empty:
                 continue
-            grouped = line.groupby("k")["sim_k"].agg(["mean", "std"]).reset_index().sort_values("k")
-            std = grouped["std"].fillna(0.0)
-            color = colors[color_index % len(colors)]
-            color_index += 1
-            label = f"{left.capitalize()} vs {right.capitalize()} ({side})"
-            ax.plot(grouped["k"], grouped["mean"], marker="o", label=label, color=color)
-            ax.fill_between(grouped["k"], grouped["mean"] - std, grouped["mean"] + std, color=color, alpha=0.15)
-
-    ax.set_xscale("log", base=2)
-    ks = sorted(subset.k.unique())
-    ax.set_xticks(ks)
-    ax.set_xticklabels([str(k) for k in ks])
-    ax.set_xlabel("Top-k singular vectors")
+            by_k = line.groupby("k")["sim_k"]
+            median, q25, q75 = by_k.median(), by_k.quantile(0.25), by_k.quantile(0.75)
+            color = pair_color[pair]
+            ax.plot(median.index, median.values, marker="o", color=color, label=f"{pair[0]} vs {pair[1]}")
+            ax.fill_between(median.index, q25.values, q75.values, color=color, alpha=0.15)
+        if subset.chance_source.eq("analytic").all():
+            chance = side_rows.groupby("k")["chance_mean"].mean().sort_index()
+            ax.plot(chance.index, chance.values, linestyle="--", color="black", label="chance k/n")
+        ax.set_xscale("log", base=2)
+        ax.set_xticks(ks)
+        ax.set_xticklabels([str(k) for k in ks])
+        ax.set_xlabel("Top-k singular vectors")
+        ax.set_title(SIDE_TITLES[side])
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8)
     metric_label = "||Q^T Q'||_F^2 / k" if subset.metric.iloc[0] == "phi" else "||Q^T Q'||_F / sqrt(k)"
-    ax.set_ylabel(f"Mean sim_k = {metric_label} across layers")
+    axes[0].set_ylabel(f"Median sim_k = {metric_label} across layers")
     n_tensors = subset["tensor"].drop_duplicates().shape[0]
-    ax.set_title(f"{kind}: top singular subspace similarity across model pairs\n"
-                 f"(mean ± 1 std across {n_tensors} layers)")
-    ax.legend()
-    ax.grid(alpha=0.3)
+    fig.suptitle(f"{kind}: top singular subspace similarity (median, 25-75% band across {n_tensors} layers)")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=170)
+    plt.close(fig)
+    print(f"wrote {output_path}")
+
+
+def plot_layer_heatmap(frame: pd.DataFrame, kind: str, pair: tuple[str, str], output_path: Path) -> None:
+    """Layer x k grid of log10(observed/chance) for one pair, one panel per side. The layer mean in
+    plot_kind hides single anomalous layers; this is where they show up."""
+    subset = frame[(frame.kind == kind) & (frame.left == pair[0]) & (frame.right == pair[1])]
+    subset = subset.dropna(subset=["layer"])
+    if subset.layer.nunique() < 2:
+        return
+    ratio = subset.observed_over_chance.clip(lower=1e-3)
+    subset = subset.assign(log_ratio=np.log10(ratio))
+    limit = max(float(subset.log_ratio.abs().max()), 1e-6)
+    norm = TwoSlopeNorm(vmin=-limit, vcenter=0.0, vmax=limit)
+    fig, axes = plt.subplots(1, 2, figsize=(14, max(4.0, 0.22 * subset.layer.nunique() + 2)))
+    for ax, side in zip(axes, ("left", "right")):
+        grid = subset[subset.side == side].pivot_table(index="layer", columns="k", values="log_ratio")
+        if grid.empty:
+            ax.set_visible(False)
+            continue
+        image = ax.imshow(grid.values, aspect="auto", cmap="RdBu_r", norm=norm, interpolation="nearest")
+        ax.set_xticks(range(grid.shape[1]))
+        ax.set_xticklabels([str(k) for k in grid.columns])
+        ax.set_yticks(range(grid.shape[0]))
+        ax.set_yticklabels([str(int(layer)) for layer in grid.index], fontsize=7)
+        ax.set_xlabel("Top-k singular vectors")
+        ax.set_ylabel("Layer")
+        ax.set_title(SIDE_TITLES[side])
+        fig.colorbar(image, ax=ax, label="log10(observed / chance)")
+    fig.suptitle(f"{kind}: {pair[0]} vs {pair[1]} per layer (0 = chance, 1 = 10x, 2 = 100x)")
     fig.tight_layout()
     fig.savefig(output_path, dpi=170)
     plt.close(fig)
@@ -173,6 +220,10 @@ def main() -> None:
 
     for kind in sorted(frame.kind.unique()):
         plot_kind(frame, kind, args.output_dir / f"{kind}_subspace_overlap.png")
+        kind_pairs = frame[frame.kind == kind][["left", "right"]].drop_duplicates().itertuples(index=False, name=None)
+        for pair in kind_pairs:
+            plot_layer_heatmap(frame, kind, pair,
+                               args.output_dir / f"{kind}_{pair[0]}_vs_{pair[1]}_layers.png")
 
 
 if __name__ == "__main__":
