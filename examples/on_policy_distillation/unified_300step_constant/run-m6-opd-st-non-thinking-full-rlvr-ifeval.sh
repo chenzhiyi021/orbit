@@ -22,8 +22,9 @@
 # ground_truth / constraint columns are unused here (they are what you would grade
 # against when evaluating).
 #
-# 300 steps x 256 prompts = 76,800 prompts over 15,000 rows, i.e. ~5.1 epochs: each
-# prompt is sampled ~5 times (reshuffled every epoch by orbit/rollout/data_source.py).
+# 300 steps x 256 prompts = 76,800 prompts over the 14,013 rows that survive the
+# 1024-token prompt filter (960 of 14,973 dropped; see ROLLOUT_ARGS), i.e. ~5.5 epochs:
+# each prompt is sampled ~5-6 times (reshuffled every epoch by orbit/rollout/data_source.py).
 # The openreasoning run sees ~100k distinct prompts over the same 300 steps, so this
 # control repeats its prompts where that run does not -- keep that in mind when
 # comparing the two deltas.
@@ -118,6 +119,12 @@ ROLLOUT_ARGS=(
     --rollout-batch-size "${ROLLOUT_BATCH_SIZE}"
     --n-samples-per-prompt "${N_SAMPLES_PER_PROMPT}"
     --rollout-max-response-len 4096
+    # Unlike openreasoning, some Tulu 2 prompts here run to thousands of tokens. The
+    # teacher scores prompt+response in one unchunked prefill and materializes fp32
+    # logits over the full 151k vocab for every token (~0.6 MB/token), so a ~4.7k
+    # prompt + 4096 response OOMed the teacher (5 GiB alloc in logits .float()).
+    # Filtered once at dataset load.
+    --rollout-max-prompt-len "${ROLLOUT_MAX_PROMPT_LEN:-1024}"
     --rollout-temperature 0.7
     --rollout-top-p 1.0
     --rollout-top-k -1
