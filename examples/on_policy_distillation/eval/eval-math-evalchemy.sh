@@ -256,11 +256,20 @@ EOF
     peft_type="$(${PYTHON_BIN} -c "import json; print(json.load(open('${iter_dir}/adapter_config.json', encoding='utf-8')).get('peft_type', ''))" | tr '[:upper:]' '[:lower:]')"
     if [ "${peft_type}" = "lora" ]; then
         echo "[eval-math-evalchemy] merging LoRA adapter into ${dense_dir}" >&2
-        ${PYTHON_BIN} - >&2 <<EOF
+        ${PYTHON_BIN} - >&2 <<EOF || return 1
+# peft's LoRA layer dispatch probes torchao for every target module, and
+# is_torchao_available() raises (rather than returning False) when an older
+# torchao is installed -- Orbit's venv pins one for SGLang. The merge never
+# needs torchao-quantized layers, so report it as absent.
+import peft.import_utils
+import peft.tuners.lora.torchao as _lora_torchao
+peft.import_utils.is_torchao_available = lambda: False
+_lora_torchao.is_torchao_available = lambda: False
+
 from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-model = AutoModelForCausalLM.from_pretrained("${base_model}", torch_dtype="bfloat16")
+model = AutoModelForCausalLM.from_pretrained("${base_model}", dtype="bfloat16")
 model = PeftModel.from_pretrained(model, "${iter_dir}").merge_and_unload()
 model.save_pretrained("${dense_dir}")
 AutoTokenizer.from_pretrained("${base_model}").save_pretrained("${dense_dir}")
@@ -268,7 +277,7 @@ EOF
     else
         echo "[eval-math-evalchemy] baking OFT adapter into ${dense_dir}" >&2
         ${PYTHON_BIN} "${ORBIT_ROOT}/tools/bake_oft_to_hf.py" \
-            --base "${base_model}" --adapter "${iter_dir}" --output "${dense_dir}" >&2
+            --base "${base_model}" --adapter "${iter_dir}" --output "${dense_dir}" >&2 || return 1
     fi
     printf '1|%s' "${dense_dir}"
 }
@@ -297,7 +306,7 @@ resolve_torch_dist() {
         --input-dir "${iter_dir}" \
         --output-dir "${dense_dir}" \
         --origin-hf-dir "${BASE_MODEL}" \
-        --force >&2
+        --force >&2 || return 1
     printf '1|%s' "${dense_dir}"
 }
 
