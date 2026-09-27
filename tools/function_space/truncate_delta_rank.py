@@ -31,6 +31,7 @@ import json
 import shutil
 import time
 from collections import defaultdict
+from contextlib import ExitStack
 from pathlib import Path
 
 import torch
@@ -70,8 +71,6 @@ def main() -> None:
     args = parser.parse_args()
 
     ks = parse_ks(args.k)
-    int_ks = [k for k in ks if isinstance(k, int)]
-    k_max = max(int_ks, default=0)
     device = torch.device(args.device)
     prefix = args.prefix or args.finetuned.name
     out_dirs = {k: args.output_root / f"{prefix}_rank{k}" for k in ks}
@@ -87,43 +86,47 @@ def main() -> None:
     other_delta_sq = 0.0
     started = time.perf_counter()
 
-    for shard in shard_files(args.finetuned):
-        print(f"--- {shard.name}", flush=True)
-        passthrough: dict[str, torch.Tensor] = {}
-        # name -> (base fp32 cpu, U[:, :r], S[:r], Vh[:r], dtype, full delta) with r = min(k_max, rank)
-        factors: dict[str, tuple] = {}
-        with safe_open(shard, framework="pt") as handle:
-            for name in handle.keys():
-                tuned = handle.get_tensor(name)
-                with safe_open(base_locations[name], framework="pt") as base_handle:
-                    base = base_handle.get_tensor(name)
-                if not CANONICAL_RE.match(name):
-                    other_delta_sq += float((tuned.float() - base.float()).pow(2).sum())
-                    passthrough[name] = tuned if args.other_params == "finetuned" else base
-                    continue
-                delta = (tuned.float() - base.float()).to(device)
-                u, s, vh = torch.linalg.svd(delta, full_matrices=False)
-                r = min(k_max, s.numel())
-                energy = s.pow(2)
-                total[kind_of(name)] += float(energy.sum())
-                for k in ks:
-                    kk = s.numel() if k == FULL else min(k, s.numel())
-                    kept[k][kind_of(name)] += float(energy[:kk].sum())
-                factors[name] = (base.float(), u[:, :r].cpu(), s[:r].cpu(), vh[:r].cpu(), tuned.dtype, delta.cpu())
-                print(f"  {name}  shape={tuple(delta.shape)}", flush=True)
+    # Base shards opened once for the whole run, not once per tensor.
+    base_handles: dict[Path, object] = {}
+    with ExitStack() as stack:
+        for path in sorted(set(base_locations.values())):
+            base_handles[path] = stack.enter_context(safe_open(path, framework="pt"))
 
-        for k in ks:
-            tensors = dict(passthrough)
-            for name, (base, u, s, vh, dtype, delta) in factors.items():
-                if k == FULL or k >= min(delta.shape):
-                    approx = delta
-                elif k == 0:
-                    approx = torch.zeros_like(delta)
-                else:
-                    approx = (u[:, :k] * s[:k]) @ vh[:k]
-                tensors[name] = (base + approx).to(dtype).contiguous()
-            save_file(tensors, str(out_dirs[k] / shard.name), metadata={"format": "pt"})
-        print(f"  wrote {shard.name} for k={ks} ({time.perf_counter() - started:.0f}s elapsed)", flush=True)
+        for shard in shard_files(args.finetuned):
+            print(f"--- {shard.name}", flush=True)
+            # One tensor at a time, everything on `device`: delta, SVD, and every k's reconstruction.
+            # Only the final (low-precision) outputs come back to host memory.
+            outputs: dict = {k: {} for k in ks}
+            with safe_open(shard, framework="pt") as handle:
+                for name in handle.keys():
+                    tuned = handle.get_tensor(name)
+                    base = base_handles[base_locations[name]].get_tensor(name)
+                    if not CANONICAL_RE.match(name):
+                        other_delta_sq += float((tuned.float() - base.float()).pow(2).sum())
+                        kept_tensor = tuned if args.other_params == "finetuned" else base
+                        for k in ks:
+                            outputs[k][name] = kept_tensor
+                        continue
+                    base_dev = base.to(device).float()
+                    delta = tuned.to(device).float() - base_dev
+                    u, s, vh = torch.linalg.svd(delta, full_matrices=False)
+                    energy = s.pow(2)
+                    total[kind_of(name)] += float(energy.sum())
+                    for k in ks:
+                        kk = s.numel() if k == FULL else min(k, s.numel())
+                        kept[k][kind_of(name)] += float(energy[:kk].sum())
+                        if kk >= s.numel():
+                            approx = delta
+                        elif kk == 0:
+                            approx = torch.zeros_like(delta)
+                        else:
+                            approx = (u[:, :kk] * s[:kk]) @ vh[:kk]
+                        outputs[k][name] = (base_dev + approx).to(tuned.dtype).cpu()
+                    del base_dev, delta, u, s, vh
+            for k in ks:
+                save_file(outputs[k], str(out_dirs[k] / shard.name), metadata={"format": "pt"})
+            del outputs
+            print(f"  wrote {shard.name} for k={ks} ({time.perf_counter() - started:.0f}s elapsed)", flush=True)
 
     for item in args.finetuned.iterdir():
         if item.is_file() and item.suffix != ".safetensors":
