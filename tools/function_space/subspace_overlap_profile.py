@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import itertools
 import statistics
+import time
 from collections import defaultdict
 from pathlib import Path
 
@@ -141,7 +142,12 @@ def main() -> None:
     parser.add_argument("--compare-base", action="store_true",
                          help=f"also compare each checkpoint's delta with the base weight's own top-k "
                               f"singular subspace (pair label '{BASE_W_NAME}')")
+    parser.add_argument("--device", default="cpu",
+                         help="where the deltas, SVDs and overlaps are computed, e.g. 'cpu' or 'cuda' / 'cuda:1'; "
+                              "the same torch.linalg.svd call dispatches to LAPACK or cuSOLVER")
     args = parser.parse_args()
+    device = torch.device(args.device)
+    started = time.perf_counter()
 
     checkpoints = {}
     for item in args.checkpoint:
@@ -155,7 +161,8 @@ def main() -> None:
     k_values = [int(k.strip()) for k in args.k.split(",") if k.strip()]
     base_locations = tensor_locations(args.base)
     tensor_names, summary_kinds = resolve_targets(args.tensors, base_locations)
-    print(f"profiling {len(tensor_names)} tensors, k={k_values}, analytic chance baseline\n", flush=True)
+    print(f"profiling {len(tensor_names)} tensors, k={k_values}, device={device}, analytic chance baseline\n",
+          flush=True)
 
     ckpt_locations = {name: tensor_locations(path) for name, path in checkpoints.items()}
     # (kind, left, right, side, k, n) -> sim_k per tensor; n is in the key so tensors of one
@@ -163,12 +170,12 @@ def main() -> None:
     per_kind_sims: dict[tuple, list[float]] = defaultdict(list)
 
     for tensor_name in tensor_names:
-        base_tensor = load_tensor(args.base, base_locations, tensor_name).float()
+        base_tensor = load_tensor(args.base, base_locations, tensor_name).float().to(device)
         n_out, n_in = base_tensor.shape
         print(f"=== {tensor_name}  (shape {tuple(base_tensor.shape)}) ===")
         deltas = {}
         for name, path in checkpoints.items():
-            other = load_tensor(path, ckpt_locations[name], tensor_name).float()
+            other = load_tensor(path, ckpt_locations[name], tensor_name).float().to(device)
             deltas[name] = other - base_tensor
         bases = {name: top_k_bases(delta, k_values) for name, delta in deltas.items()}
         pairs = list(itertools.combinations(checkpoints, 2))
@@ -188,6 +195,7 @@ def main() -> None:
                         per_kind_sims[(tensor_kind(tensor_name), left_name, right_name, side, k, n_dim)].append(sim)
         print()
 
+    print(f"##### per-tensor profiling took {time.perf_counter() - started:.1f}s on {device} #####\n", flush=True)
     if not per_kind_sims:
         return
     print("##### mean +/- std over layers, per tensor kind #####\n")
