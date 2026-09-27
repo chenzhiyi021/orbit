@@ -154,7 +154,11 @@ RL_ARGS=(
     --teacher-hf-checkpoint "${OPD_TEACHER_CKPT}"
     --opd-serve-teacher
     --opd-teacher-num-gpus "${OPD_TEACHER_NUM_GPUS}"
-    --opd-teacher-mem-fraction "${OPD_TEACHER_MEM_FRACTION:-0.35}"
+    # 0.2, not the openreasoning 0.35: the teacher's scoring prefill materializes fp32
+    # full-vocab logits outside the static pool (~0.6 MB/token, then again for
+    # log_softmax), and a ~7.4k-token batch OOMed with only ~4 GiB left at 0.35.
+    # 0.2 still leaves ~10 GB of KV per GPU (~130k tokens for the 4B teacher at TP2).
+    --opd-teacher-mem-fraction "${OPD_TEACHER_MEM_FRACTION:-0.2}"
     --opd-teacher-max-running-requests "${OPD_TEACHER_MAX_RUNNING_REQUESTS:-64}"
     --opd-teacher-max-prefill-tokens "${OPD_TEACHER_MAX_PREFILL_TOKENS:-4096}"
     --advantage-estimator on_policy_distillation
