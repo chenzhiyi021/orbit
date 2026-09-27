@@ -1,0 +1,152 @@
+"""Rank-k truncation of a fine-tune's weight deltas, saved as ready-to-eval HF checkpoints.
+
+For every canonical q/k/v/o/gate/up/down weight,
+
+    W_rank_k = W_base + U_k S_k V_k^T,   U S V^T = SVD(W_finetuned - W_base)
+
+i.e. the fine-tune's update is kept only along its top-k singular directions. Every other
+tensor (RMSNorm scales, embeddings) is copied from the fine-tune by default, so the only
+difference from the fine-tuned model is the truncation itself; pass --other-params base to
+revert those to the base model as well.
+
+Each tensor is decomposed once and every requested k is written from the same factors, so
+one run produces one HF directory per k:
+
+    <output-root>/<prefix>_rank<k>/   (config, tokenizer and index copied from the fine-tune)
+
+k larger than a tensor's smaller dimension keeps that tensor's full delta; "full" keeps
+every delta (a sanity check -- it should score like the fine-tuned model, up to bf16
+rounding). Each output directory also gets rank_truncation_report.json with the fraction of
+||Delta W||_F^2 kept, per tensor kind.
+
+    python truncate_delta_rank.py \\
+        --base /mnt/L202500431/models/qwen3-1.7b \\
+        --finetuned /mnt/L202500431/models/zh_models/m6_st_full_non_thinking_hf_step300 \\
+        --k 1,4,16,64,256,full --output-root /mnt/L202500431/models/rank_truncated --device cuda
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import shutil
+import time
+from collections import defaultdict
+from pathlib import Path
+
+import torch
+from safetensors import safe_open
+from safetensors.torch import save_file
+
+from svd_rank_profile import CANONICAL_RE, shard_files, tensor_locations
+
+FULL = "full"
+
+
+def parse_ks(spec: str) -> list[int | str]:
+    ks: list[int | str] = []
+    for item in (s.strip() for s in spec.split(",")):
+        if not item:
+            continue
+        ks.append(FULL if item == FULL else int(item))
+    if any(isinstance(k, int) and k < 0 for k in ks):
+        raise ValueError("--k values must be >= 0 or 'full'")
+    return list(dict.fromkeys(ks))
+
+
+def kind_of(name: str) -> str:
+    return name.split(".")[-2]
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--base", required=True, type=Path, help="base HF checkpoint directory")
+    parser.add_argument("--finetuned", required=True, type=Path, help="fine-tuned HF checkpoint directory")
+    parser.add_argument("--k", required=True, help="comma-separated ranks, e.g. '1,4,16,64,256,full'")
+    parser.add_argument("--output-root", required=True, type=Path)
+    parser.add_argument("--prefix", default=None, help="output dir prefix (default: the fine-tune's dir name)")
+    parser.add_argument("--other-params", choices=("finetuned", "base"), default="finetuned",
+                        help="source for every non-q/k/v/o/gate/up/down tensor (norms, embeddings)")
+    parser.add_argument("--device", default="cpu", help="where the SVDs run, e.g. 'cpu' or 'cuda'")
+    args = parser.parse_args()
+
+    ks = parse_ks(args.k)
+    int_ks = [k for k in ks if isinstance(k, int)]
+    k_max = max(int_ks, default=0)
+    device = torch.device(args.device)
+    prefix = args.prefix or args.finetuned.name
+    out_dirs = {k: args.output_root / f"{prefix}_rank{k}" for k in ks}
+    for out_dir in out_dirs.values():
+        if out_dir.exists() and any(out_dir.glob("*.safetensors")):
+            raise FileExistsError(f"{out_dir} already has weights; remove it or pick another --output-root/--prefix")
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+    base_locations = tensor_locations(args.base)
+    # kept energy per k, per kind: sums of ||Delta_k||^2 and ||Delta||^2
+    kept = {k: defaultdict(float) for k in ks}
+    total = defaultdict(float)
+    other_delta_sq = 0.0
+    started = time.perf_counter()
+
+    for shard in shard_files(args.finetuned):
+        print(f"--- {shard.name}", flush=True)
+        passthrough: dict[str, torch.Tensor] = {}
+        # name -> (base fp32 cpu, U[:, :r], S[:r], Vh[:r], dtype, full delta) with r = min(k_max, rank)
+        factors: dict[str, tuple] = {}
+        with safe_open(shard, framework="pt") as handle:
+            for name in handle.keys():
+                tuned = handle.get_tensor(name)
+                with safe_open(base_locations[name], framework="pt") as base_handle:
+                    base = base_handle.get_tensor(name)
+                if not CANONICAL_RE.match(name):
+                    other_delta_sq += float((tuned.float() - base.float()).pow(2).sum())
+                    passthrough[name] = tuned if args.other_params == "finetuned" else base
+                    continue
+                delta = (tuned.float() - base.float()).to(device)
+                u, s, vh = torch.linalg.svd(delta, full_matrices=False)
+                r = min(k_max, s.numel())
+                energy = s.pow(2)
+                total[kind_of(name)] += float(energy.sum())
+                for k in ks:
+                    kk = s.numel() if k == FULL else min(k, s.numel())
+                    kept[k][kind_of(name)] += float(energy[:kk].sum())
+                factors[name] = (base.float(), u[:, :r].cpu(), s[:r].cpu(), vh[:r].cpu(), tuned.dtype, delta.cpu())
+                print(f"  {name}  shape={tuple(delta.shape)}", flush=True)
+
+        for k in ks:
+            tensors = dict(passthrough)
+            for name, (base, u, s, vh, dtype, delta) in factors.items():
+                if k == FULL or k >= min(delta.shape):
+                    approx = delta
+                elif k == 0:
+                    approx = torch.zeros_like(delta)
+                else:
+                    approx = (u[:, :k] * s[:k]) @ vh[:k]
+                tensors[name] = (base + approx).to(dtype).contiguous()
+            save_file(tensors, str(out_dirs[k] / shard.name), metadata={"format": "pt"})
+        print(f"  wrote {shard.name} for k={ks} ({time.perf_counter() - started:.0f}s elapsed)", flush=True)
+
+    for item in args.finetuned.iterdir():
+        if item.is_file() and item.suffix != ".safetensors":
+            for out_dir in out_dirs.values():
+                shutil.copy2(item, out_dir / item.name)
+
+    all_kinds = sorted(total)
+    grand_total = sum(total.values())
+    print(f"\nfraction of ||Delta W||_F^2 kept (q/k/v/o/gate/up/down only; "
+          f"other tensors' delta energy = {other_delta_sq:.4g}, taken from --other-params={args.other_params})")
+    print(f"{'k':>6s} {'all':>7s} " + " ".join(f"{kind:>9s}" for kind in all_kinds))
+    for k in ks:
+        overall = sum(kept[k].values()) / grand_total if grand_total else float("nan")
+        per_kind = {kind: kept[k][kind] / total[kind] for kind in all_kinds}
+        print(f"{str(k):>6s} {overall:7.3f} " + " ".join(f"{per_kind[kind]:9.3f}" for kind in all_kinds))
+        report = dict(base=str(args.base), finetuned=str(args.finetuned), k=k, other_params=args.other_params,
+                      kept_energy_fraction_all=overall, kept_energy_fraction_per_kind=per_kind,
+                      other_tensors_delta_sq=other_delta_sq)
+        (out_dirs[k] / "rank_truncation_report.json").write_text(json.dumps(report, indent=2))
+    print(f"\ndone in {time.perf_counter() - started:.0f}s; outputs:")
+    for out_dir in out_dirs.values():
+        print(f"  {out_dir}")
+
+
+if __name__ == "__main__":
+    main()
