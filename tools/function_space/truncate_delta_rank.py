@@ -84,6 +84,8 @@ def main() -> None:
     kept = {k: defaultdict(float) for k in ks}
     total = defaultdict(float)
     other_delta_sq = 0.0
+    n_targets = sum(1 for name in tensor_locations(args.finetuned) if CANONICAL_RE.match(name))
+    done = 0
     started = time.perf_counter()
 
     # Base shards opened once for the whole run, not once per tensor.
@@ -122,6 +124,9 @@ def main() -> None:
                         else:
                             approx = (u[:, :kk] * s[:kk]) @ vh[:kk]
                         outputs[k][name] = (base_dev + approx).to(tuned.dtype).cpu()
+                    done += 1
+                    print(f"  [{done}/{n_targets}] {name}  shape={tuple(delta.shape)}  "
+                          f"({time.perf_counter() - started:.0f}s)", flush=True)
                     del base_dev, delta, u, s, vh
             for k in ks:
                 save_file(outputs[k], str(out_dirs[k] / shard.name), metadata={"format": "pt"})
