@@ -128,7 +128,9 @@ RL_ARGS=(
     --teacher-hf-checkpoint "${OPD_TEACHER_CKPT}"
     --opd-serve-teacher
     --opd-teacher-num-gpus "${OPD_TEACHER_NUM_GPUS}"
-    --opd-teacher-mem-fraction "${OPD_TEACHER_MEM_FRACTION:-0.35}"
+    # 0.2, not 0.35: at TP=1 the resident train state (full-model train offload is
+    # unsupported) leaves ~35 GB per GPU for the student engine + teacher; 0.35 OOMed rollout 1.
+    --opd-teacher-mem-fraction "${OPD_TEACHER_MEM_FRACTION:-0.2}"
     --opd-teacher-max-running-requests "${OPD_TEACHER_MAX_RUNNING_REQUESTS:-64}"
     --opd-teacher-max-prefill-tokens "${OPD_TEACHER_MAX_PREFILL_TOKENS:-4096}"
     --advantage-estimator on_policy_distillation
@@ -173,7 +175,8 @@ SGLANG_ARGS=(
     --num-gpus-per-node "${GPUS_PER_NODE}"
     --rollout-num-gpus-per-engine 1
     --rollout-num-gpus "${ROLLOUT_NUM_GPUS}"
-    --sglang-mem-fraction-static "${SGLANG_MEM_FRACTION_STATIC:-0.25}"
+    # 0.18, not 0.25: see the teacher mem-fraction note (TP=1 keeps more train state resident).
+    --sglang-mem-fraction-static "${SGLANG_MEM_FRACTION_STATIC:-0.18}"
     --sglang-server-concurrency "${SGLANG_SERVER_CONCURRENCY:-32}"
     --sglang-max-running-requests "${SGLANG_MAX_RUNNING_REQUESTS:-512}"
     --router-disable-circuit-breaker

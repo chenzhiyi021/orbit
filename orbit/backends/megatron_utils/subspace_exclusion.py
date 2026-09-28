@@ -61,7 +61,7 @@ class _Block:
 class _Target:
     megatron_name: str
     param: torch.nn.Parameter
-    base: torch.Tensor  # bf16 copy of the initial (base) weights, Megatron layout
+    base: torch.Tensor  # bf16 copy of the initial (base) weights, Megatron layout, in pinned host memory
     blocks: list[_Block] = field(default_factory=list)
 
 
@@ -141,7 +141,10 @@ class SubspaceExclusion:
                             setattr(block, attr, handle.get_tensor(key)[:, : self.k].float().to(device).contiguous())
                         if block.rows is not None:
                             block.rows = block.rows.to(device)
-                    self.targets.append(_Target(name, param, param.detach().clone(), blocks))
+                    # Host copy: full-model train offload is unsupported, so GPU memory is tight at
+                    # TP=1 (the rollout engine + teacher share it); ~2.8 GB/GPU for Qwen3-1.7B.
+                    base = param.detach().to("cpu", copy=True).pin_memory()
+                    self.targets.append(_Target(name, param, base, blocks))
         if not self.targets:
             raise RuntimeError("--exclude-subspace-path set but no linear_qkv/linear_proj/linear_fc1/linear_fc2 weights found")
         self._check_layout(args.hf_checkpoint)
@@ -165,7 +168,7 @@ class SubspaceExclusion:
                 locations = {name: str(single) for name in handle.keys()}
         checks = [t for t in self.targets if ".layers.0." in t.megatron_name] or self.targets[:4]
         for target in checks:
-            rebuilt = torch.empty_like(target.base)
+            rebuilt = torch.empty_like(target.base, device="cpu", pin_memory=False)
             for block in target.blocks:
                 with safe_open(locations[block.hf_name], framework="pt") as handle:
                     weight = handle.get_tensor(block.hf_name).to(rebuilt.device, rebuilt.dtype)
@@ -196,17 +199,18 @@ class SubspaceExclusion:
     @torch.no_grad()
     def constrain_params(self) -> None:
         for target in self.targets:
-            base32 = target.base.float()
+            base32 = target.base.to(target.param.device, non_blocking=True).float()
             delta = target.param.data.float() - base32
             project_(delta, target.blocks, self.side)
             target.param.data.copy_((base32 + delta).to(target.param.dtype))
+            del base32, delta
 
     @torch.no_grad()
     def excluded_fraction(self) -> float:
         """||delta inside the excluded subspace||^2 / ||delta||^2 over all targets (should stay ~0)."""
         inside, total = 0.0, 0.0
         for target in self.targets:
-            delta = target.param.data.float() - target.base.float()
+            delta = target.param.data.float() - target.base.to(target.param.device).float()
             kept = project_(delta.clone(), target.blocks, self.side)
             total += float(delta.pow(2).sum())
             inside += float((delta - kept).pow(2).sum())
