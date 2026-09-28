@@ -49,6 +49,7 @@ from .low_precision_bootstrap import should_preload_low_precision_model_before_o
 from .model_provider import get_model_provider_func
 from .parallel import get_packed_seq_params
 from .peft_utils import is_peft_enabled, is_peft_model, save_peft_checkpoint
+from . import subspace_exclusion
 
 logger = logging.getLogger(__name__)
 
@@ -607,6 +608,12 @@ def train_one_step(
         assert update_successful
         opt_param_scheduler.step(increment=args.global_batch_size)
 
+    # --exclude-subspace-*: rewrite the (all-gathered) params as W_base + P(W - W_base) so the
+    # next forward, the rollout weight sync and saved checkpoints use the constrained weights.
+    exclusion = subspace_exclusion.get(args, model)
+    if exclusion is not None:
+        exclusion.constrain_params()
+
     # release grad
     for model_chunk in model:
         model_chunk.zero_grad_buffer()
@@ -627,6 +634,13 @@ def finalize_model_grads_with_empty_cache(*args, **kwargs):
     if free / total < 0.1:
         clear_memory()
     return finalize_model_grads(*args, **kwargs)
+
+
+def finalize_model_grads_with_projection(exclusion, *args, **kwargs):
+    # Project each rank's local grads before the DP reduction inside finalize_model_grads:
+    # projection is linear, so the reduced grad is exactly P(global grad) = dL/dW_raw.
+    exclusion.project_grads()
+    return finalize_model_grads_with_empty_cache(*args, **kwargs)
 
 
 def train(
@@ -681,6 +695,10 @@ def train(
         if len(model) == 1:
             config.param_sync_func = config.param_sync_func[0]
     config.finalize_model_grads_func = finalize_model_grads_with_empty_cache
+    # Built on the first rollout, while the params are still the base checkpoint.
+    exclusion = subspace_exclusion.get(args, model)
+    if exclusion is not None:
+        config.finalize_model_grads_func = partial(finalize_model_grads_with_projection, exclusion)
 
     pre_hook_enabled = False
 

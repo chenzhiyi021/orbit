@@ -2412,6 +2412,30 @@ def get_orbit_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--exclude-subspace-path",
+                type=str,
+                default=None,
+                help=(
+                    "Per-tensor subspace bases (tools/function_space/build_exclusion_subspace.py). When set, "
+                    "the full fine-tune's update to every q/k/v/o/gate/up/down weight is kept out of the "
+                    "first --exclude-subspace-k directions of that tensor's basis "
+                    "(orbit/backends/megatron_utils/subspace_exclusion.py). Requires TP=PP=1."
+                ),
+            )
+            parser.add_argument(
+                "--exclude-subspace-k",
+                type=int,
+                default=64,
+                help="Number of leading basis directions to exclude per tensor (<= the file's k_max).",
+            )
+            parser.add_argument(
+                "--exclude-subspace-side",
+                type=str,
+                default="both",
+                choices=["left", "right", "both"],
+                help="Exclude the output-space (left, U), input-space (right, V) directions, or both.",
+            )
+            parser.add_argument(
                 "--use-rollout-logprobs",
                 action="store_true",
                 default=False,

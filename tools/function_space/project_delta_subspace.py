@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
 import time
 from collections import defaultdict
 from contextlib import ExitStack
@@ -49,6 +48,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 from svd_rank_profile import CANONICAL_RE, shard_files, tensor_locations
+from truncate_delta_rank import copy_side_files
 
 MODES = ("in_keep", "in_remove", "out_keep", "out_remove")
 RANDOM_MODES = ("rand_in_keep", "rand_out_keep")
@@ -170,9 +170,7 @@ def main() -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
         for shard_name, tensors in per_shard.items():
             save_file(tensors, str(out_dir / shard_name), metadata={"format": "pt"})
-        for item in args.source.iterdir():
-            if item.is_file() and item.suffix != ".safetensors":
-                shutil.copy2(item, out_dir / item.name)
+        copy_side_files(args.source, args.base, out_dir)
         overall = sum(kept.values()) / max(sum(total.values()), 1e-30)
         per_kind = {kind: kept[kind] / total[kind] for kind in sorted(total)}
         (out_dir / "projection_report.json").write_text(json.dumps(dict(

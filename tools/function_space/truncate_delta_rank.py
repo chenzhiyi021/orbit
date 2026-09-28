@@ -42,6 +42,24 @@ from svd_rank_profile import CANONICAL_RE, shard_files, tensor_locations
 
 FULL = "full"
 
+# Files that make up the tokenizer / chat template. Taken from the base model rather than the
+# fine-tune: the tokenizer never changes during fine-tuning, and a fine-tune exported by a
+# different transformers version can carry a tokenizer_config.json this environment cannot load
+# (e.g. TRL exports with a list-valued "extra_special_tokens").
+TOKENIZER_FILES = {"tokenizer.json", "tokenizer_config.json", "vocab.json", "merges.txt",
+                   "special_tokens_map.json", "added_tokens.json", "chat_template.jinja", "chat_template.json"}
+
+
+def copy_side_files(source_dir: Path, base_dir: Path, out_dir: Path) -> None:
+    """Copy the non-weight files an HF directory needs: config / generation settings from the
+    fine-tune, tokenizer and chat-template files from the base model."""
+    for item in source_dir.iterdir():
+        if item.is_file() and item.suffix != ".safetensors" and item.name not in TOKENIZER_FILES:
+            shutil.copy2(item, out_dir / item.name)
+    for name in TOKENIZER_FILES:
+        if (base_dir / name).is_file():
+            shutil.copy2(base_dir / name, out_dir / name)
+
 
 def parse_ks(spec: str) -> list[int | str]:
     ks: list[int | str] = []
@@ -133,10 +151,8 @@ def main() -> None:
             del outputs
             print(f"  wrote {shard.name} for k={ks} ({time.perf_counter() - started:.0f}s elapsed)", flush=True)
 
-    for item in args.finetuned.iterdir():
-        if item.is_file() and item.suffix != ".safetensors":
-            for out_dir in out_dirs.values():
-                shutil.copy2(item, out_dir / item.name)
+    for out_dir in out_dirs.values():
+        copy_side_files(args.finetuned, args.base, out_dir)
 
     all_kinds = sorted(total)
     grand_total = sum(total.values())
