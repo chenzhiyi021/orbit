@@ -42,23 +42,21 @@ from svd_rank_profile import CANONICAL_RE, shard_files, tensor_locations
 
 FULL = "full"
 
-# Files that make up the tokenizer / chat template. Taken from the base model rather than the
-# fine-tune: the tokenizer never changes during fine-tuning, and a fine-tune exported by a
-# different transformers version can carry a tokenizer_config.json this environment cannot load
-# (e.g. TRL exports with a list-valued "extra_special_tokens").
-TOKENIZER_FILES = {"tokenizer.json", "tokenizer_config.json", "vocab.json", "merges.txt",
-                   "special_tokens_map.json", "added_tokens.json", "chat_template.jinja", "chat_template.json"}
-
-
 def copy_side_files(source_dir: Path, base_dir: Path, out_dir: Path) -> None:
-    """Copy the non-weight files an HF directory needs: config / generation settings from the
-    fine-tune, tokenizer and chat-template files from the base model."""
-    for item in source_dir.iterdir():
-        if item.is_file() and item.suffix != ".safetensors" and item.name not in TOKENIZER_FILES:
+    """Copy the non-weight files (config, generation config, tokenizer, chat template) from the
+    BASE model, never from the fine-tune. The outputs share the base architecture and tokenizer,
+    and a fine-tune exported by a different transformers version can carry files this environment
+    misreads -- e.g. TRL exports put RoPE in a "rope_parameters" block that older transformers /
+    SGLang ignore (silently falling back to rope_theta=10000 instead of 1e6, which wrecks the
+    model), and a list-valued "extra_special_tokens" in tokenizer_config.json that fails to load.
+    The one exception is the shard index: the output shards reuse the fine-tune's shard file
+    names, so its model.safetensors.index.json (if any) is the one that matches them."""
+    index_name = "model.safetensors.index.json"
+    for item in base_dir.iterdir():
+        if item.is_file() and item.suffix != ".safetensors" and item.name != index_name:
             shutil.copy2(item, out_dir / item.name)
-    for name in TOKENIZER_FILES:
-        if (base_dir / name).is_file():
-            shutil.copy2(base_dir / name, out_dir / name)
+    if (source_dir / index_name).is_file():
+        shutil.copy2(source_dir / index_name, out_dir / index_name)
 
 
 def parse_ks(spec: str) -> list[int | str]:
