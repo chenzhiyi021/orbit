@@ -177,6 +177,11 @@ SGLANG_ARGS=(
     --rollout-num-gpus "${ROLLOUT_NUM_GPUS}"
     # 0.18, not 0.25: see the teacher mem-fraction note (TP=1 keeps more train state resident).
     --sglang-mem-fraction-static "${SGLANG_MEM_FRACTION_STATIC:-0.18}"
+    # Student engine only (the managed teacher forces chunked_prefill_size=-1 itself). With the
+    # small KV pool, retracted requests are re-prefilled in large extend batches whose fp32
+    # full-vocab logits (~0.6 MB/token) OOMed GPU 0 at rollout 4 (1.5 GiB alloc, 0.8 GiB free);
+    # 1024-token chunks cap that transient at ~0.6 GB.
+    --sglang-chunked-prefill-size "${SGLANG_CHUNKED_PREFILL_SIZE:-1024}"
     --sglang-server-concurrency "${SGLANG_SERVER_CONCURRENCY:-32}"
     --sglang-max-running-requests "${SGLANG_MAX_RUNNING_REQUESTS:-512}"
     --router-disable-circuit-breaker
