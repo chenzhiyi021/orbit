@@ -108,6 +108,12 @@ def project_(matrix: torch.Tensor, blocks: list[_Block], side: str) -> torch.Ten
     return matrix
 
 
+def _blocks_on(blocks: list[_Block], device) -> list[_Block]:
+    """Device copies of the (host-pinned) U/V bases for one tensor's projection."""
+    return [_Block(b.hf_name, b.rows, b.u.to(device, non_blocking=True), b.v.to(device, non_blocking=True))
+            for b in blocks]
+
+
 class SubspaceExclusion:
     def __init__(self, args, model_chunks) -> None:
         from safetensors import safe_open
@@ -138,7 +144,9 @@ class SubspaceExclusion:
                             key = f"{block.hf_name}.{side_key}"
                             if key not in available:
                                 raise KeyError(f"{key} missing from {path}")
-                            setattr(block, attr, handle.get_tensor(key)[:, : self.k].float().to(device).contiguous())
+                            # Host-pinned, copied to the GPU per tensor when used: at k=1024 the
+                            # bases are ~4.5 GB/GPU for Qwen3-1.7B, too much to keep resident.
+                            setattr(block, attr, handle.get_tensor(key)[:, : self.k].float().contiguous().pin_memory())
                         if block.rows is not None:
                             block.rows = block.rows.to(device)
                     # Host copy: full-model train offload is unsupported, so GPU memory is tight at
@@ -175,7 +183,7 @@ class SubspaceExclusion:
                 if block.rows is None:
                     rebuilt.copy_(weight)
                 else:
-                    rebuilt[block.rows] = weight
+                    rebuilt[block.rows.cpu()] = weight
             err = (rebuilt.float() - target.base.float()).abs().max().item()
             if err > 1e-2:
                 raise RuntimeError(
@@ -193,15 +201,16 @@ class SubspaceExclusion:
             if grad is None:
                 continue
             g32 = grad.float()
-            project_(g32, target.blocks, self.side)
+            project_(g32, _blocks_on(target.blocks, g32.device), self.side)
             grad.copy_(g32)
 
     @torch.no_grad()
     def constrain_params(self) -> None:
         for target in self.targets:
-            base32 = target.base.to(target.param.device, non_blocking=True).float()
+            device = target.param.device
+            base32 = target.base.to(device, non_blocking=True).float()
             delta = target.param.data.float() - base32
-            project_(delta, target.blocks, self.side)
+            project_(delta, _blocks_on(target.blocks, device), self.side)
             target.param.data.copy_((base32 + delta).to(target.param.dtype))
             del base32, delta
 
@@ -210,8 +219,9 @@ class SubspaceExclusion:
         """||delta inside the excluded subspace||^2 / ||delta||^2 over all targets (should stay ~0)."""
         inside, total = 0.0, 0.0
         for target in self.targets:
-            delta = target.param.data.float() - target.base.to(target.param.device).float()
-            kept = project_(delta.clone(), target.blocks, self.side)
+            device = target.param.device
+            delta = target.param.data.float() - target.base.to(device).float()
+            kept = project_(delta.clone(), _blocks_on(target.blocks, device), self.side)
             total += float(delta.pow(2).sum())
             inside += float((delta - kept).pow(2).sum())
         return inside / total if total > 0 else 0.0
