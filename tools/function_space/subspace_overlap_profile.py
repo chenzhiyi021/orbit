@@ -83,9 +83,13 @@ def resolve_targets(spec: str | None, locations: dict[str, Path]) -> tuple[list[
     return list(dict.fromkeys(names)), summary_kinds
 
 
-def top_k_bases(delta: torch.Tensor, k_values: list[int]) -> dict[str, dict[int, torch.Tensor]]:
-    """SVD , slice out top-k left/right singular vectors for every k."""
-    u, _, vh = torch.linalg.svd(delta.float(), full_matrices=False)
+SVD_DTYPES = {"float32": torch.float32, "float64": torch.float64}
+
+
+def top_k_bases(delta: torch.Tensor, k_values: list[int],
+                dtype: torch.dtype = torch.float32) -> dict[str, dict[int, torch.Tensor]]:
+    """SVD in `dtype`, slice out top-k left/right singular vectors for every k."""
+    u, _, vh = torch.linalg.svd(delta.to(dtype), full_matrices=False)
     v = vh.transpose(0, 1)
     max_k = min(u.shape[1], v.shape[1])
     return {
@@ -145,7 +149,10 @@ def main() -> None:
     parser.add_argument("--device", default="cpu",
                          help="where the deltas, SVDs and overlaps are computed, e.g. 'cpu' or 'cuda' / 'cuda:1'; "
                               "the same torch.linalg.svd call dispatches to LAPACK or cuSOLVER")
+    parser.add_argument("--svd-dtype", default="float32", choices=tuple(SVD_DTYPES),
+                         help="precision of the deltas, SVDs and overlaps; bf16 checkpoints are upcast exactly")
     args = parser.parse_args()
+    svd_dtype = SVD_DTYPES[args.svd_dtype]
     device = torch.device(args.device)
     started = time.perf_counter()
 
@@ -161,7 +168,8 @@ def main() -> None:
     k_values = [int(k.strip()) for k in args.k.split(",") if k.strip()]
     base_locations = tensor_locations(args.base)
     tensor_names, summary_kinds = resolve_targets(args.tensors, base_locations)
-    print(f"profiling {len(tensor_names)} tensors, k={k_values}, device={device}, analytic chance baseline\n",
+    print(f"profiling {len(tensor_names)} tensors, k={k_values}, device={device}, svd_dtype={args.svd_dtype}, "
+          f"analytic chance baseline\n",
           flush=True)
 
     ckpt_locations = {name: tensor_locations(path) for name, path in checkpoints.items()}
@@ -170,17 +178,17 @@ def main() -> None:
     per_kind_sims: dict[tuple, list[float]] = defaultdict(list)
 
     for tensor_name in tensor_names:
-        base_tensor = load_tensor(args.base, base_locations, tensor_name).float().to(device)
+        base_tensor = load_tensor(args.base, base_locations, tensor_name).to(device, svd_dtype)
         n_out, n_in = base_tensor.shape
         print(f"=== {tensor_name}  (shape {tuple(base_tensor.shape)}) ===")
         deltas = {}
         for name, path in checkpoints.items():
-            other = load_tensor(path, ckpt_locations[name], tensor_name).float().to(device)
+            other = load_tensor(path, ckpt_locations[name], tensor_name).to(device, svd_dtype)
             deltas[name] = other - base_tensor
-        bases = {name: top_k_bases(delta, k_values) for name, delta in deltas.items()}
+        bases = {name: top_k_bases(delta, k_values, svd_dtype) for name, delta in deltas.items()}
         pairs = list(itertools.combinations(checkpoints, 2))
         if args.compare_base:
-            bases[BASE_W_NAME] = top_k_bases(base_tensor, k_values)
+            bases[BASE_W_NAME] = top_k_bases(base_tensor, k_values, svd_dtype)
             pairs += [(name, BASE_W_NAME) for name in checkpoints]
 
         for left_name, right_name in pairs:
