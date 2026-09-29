@@ -8,9 +8,12 @@ and the cumulative energy fraction
 
     E(k) = sum_{i<=k} s_i^2 / sum_i s_i^2 = sum_{i<=k} s_i^2 / ||Delta W||_F^2,
 
-then plots E(k) for k = 0..--max-k: one line per kind (mean over layers, 25-75% band across
-layers). The SVD runs once per --svd-dtype and each dtype gets its own figure, so float32 and
-float64 can be compared on identical deltas (bf16 checkpoints upcast exactly to either).
+then plots E(k) at k = 1, 2, 4, ..., --max-k on a log2 axis: one line per kind (mean over
+layers), a thick black line for the mean over every tensor, and a dashed grey reference for an
+i.i.d. Gaussian matrix of the same shapes (no low-rank structure; averaged over tensors the same
+way as the black line). The SVD runs once per --svd-dtype and each dtype gets its own figure,
+so float32 and float64 can be compared on identical deltas (bf16 checkpoints upcast exactly to
+either).
 
 Outputs in --output-dir:
     energy_spectrum_<dtype>.png     one figure per --svd-dtype
@@ -42,7 +45,8 @@ from svd_rank_profile import CANONICAL_RE, load_tensor, tensor_locations
 
 SVD_DTYPES = {"float32": torch.float32, "float64": torch.float64}
 KIND_ORDER = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
-REPORT_KS = (1, 4, 16, 64, 256, 1024)
+REPORT_KS = (1, 4, 16, 64, 256, 1024, 2048)
+ALL_LABEL = "all"
 
 
 def tensor_kind(tensor_name: str) -> str:
@@ -58,22 +62,36 @@ def cumulative_energy(singular: np.ndarray, max_k: int) -> np.ndarray:
     return cum[: max_k + 1]
 
 
-def plot_dtype(curves: dict[str, list[np.ndarray]], dtype: str, max_k: int, title: str, output_path: Path) -> None:
-    fig, ax = plt.subplots(figsize=(10, 6.5))
-    ks = np.arange(max_k + 1)
+def random_baseline(shape: tuple[int, int], dtype: torch.dtype, device: torch.device, max_k: int,
+                    seed: int = 0) -> np.ndarray:
+    """E(k) of one i.i.d. Gaussian matrix of `shape` -- the no-structure reference."""
+    generator = torch.Generator(device=device).manual_seed(seed)
+    noise = torch.randn(shape, generator=generator, device=device, dtype=dtype)
+    return cumulative_energy(torch.linalg.svdvals(noise).double().cpu().numpy(), max_k)
+
+
+def plot_dtype(curves: dict[str, list[np.ndarray]], random_curves: list[np.ndarray], dtype: str,
+               max_k: int, title: str, output_path: Path) -> None:
+    """E(k) at powers of two on a log2 axis: one line per kind (mean over layers), black = mean over
+    every tensor, dashed grey = same-shape Gaussian reference."""
+    ks = [2 ** p for p in range(int(np.log2(max_k)) + 1)]
+    fig, ax = plt.subplots(figsize=(8, 6))
     for kind in [k for k in KIND_ORDER if k in curves] + sorted(set(curves) - set(KIND_ORDER)):
         stack = np.stack(curves[kind])
-        mean = stack.mean(0)
-        q25, q75 = np.quantile(stack, [0.25, 0.75], axis=0)
-        line, = ax.plot(ks, mean, label=f"{kind} (n={len(stack)})", linewidth=1.6)
-        ax.fill_between(ks, q25, q75, color=line.get_color(), alpha=0.15)
-    ax.set_xlim(0, max_k)
-    ax.set_ylim(0, 1.0)
-    ax.set_xlabel("Top-k singular values")
-    ax.set_ylabel("Cumulative energy  sum_{i<=k} s_i^2 / ||Delta W||_F^2")
-    ax.set_title(f"{title}\nSVD in {dtype}: mean over layers, 25-75% band")
+        ax.plot(ks, stack.mean(0)[ks], marker="o", linewidth=1.4, label=kind)
+    everything = np.stack([c for kind_curves in curves.values() for c in kind_curves])
+    ax.plot(ks, everything.mean(0)[ks], color="black", linewidth=2.6, label=f"{ALL_LABEL} (n={len(everything)})")
+    ax.plot(ks, np.stack(random_curves).mean(0)[ks], color="grey", linestyle="--", linewidth=1.2,
+            label="random Gaussian (same shapes)")
+    ax.set_xscale("log", base=2)
+    ax.set_xticks(ks)
+    ax.set_xticklabels([str(k) for k in ks])
+    ax.set_ylim(0, 1.02)
+    ax.set_xlabel("k")
+    ax.set_ylabel("energy in top-k singular directions")
+    ax.set_title(f"{title}\nSVD in {dtype}, mean over layers")
     ax.grid(alpha=0.3)
-    ax.legend(loc="lower right")
+    ax.legend(loc="upper left", fontsize=9)
     fig.tight_layout()
     fig.savefig(output_path, dpi=170)
     plt.close(fig)
@@ -86,7 +104,8 @@ def main() -> None:
     parser.add_argument("--finetuned", required=True, type=Path)
     parser.add_argument("--svd-dtypes", default="float32,float64",
                          help=f"comma-separated SVD precisions from {tuple(SVD_DTYPES)}; one figure each")
-    parser.add_argument("--max-k", type=int, default=1024, help="x-axis extent (top-k singular values)")
+    parser.add_argument("--max-k", type=int, default=2048,
+                         help="x-axis extent, a power of two (2048 = the largest min dim of Qwen3-1.7B's targets)")
     parser.add_argument("--device", default="cpu", help="where the deltas and SVDs are computed, e.g. 'cuda'")
     parser.add_argument("--title", default=None, help="figure title (default: the fine-tune's dir name)")
     parser.add_argument("--output-dir", required=True, type=Path)
@@ -96,6 +115,8 @@ def main() -> None:
     unknown = set(dtypes) - set(SVD_DTYPES)
     if unknown:
         raise ValueError(f"unknown --svd-dtypes {sorted(unknown)}; choose from {tuple(SVD_DTYPES)}")
+    if args.max_k < 1 or args.max_k & (args.max_k - 1):
+        raise ValueError(f"--max-k must be a power of two, got {args.max_k}")
     device = torch.device(args.device)
     title = args.title or args.finetuned.name
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -112,10 +133,16 @@ def main() -> None:
 
     spectra: dict[str, np.ndarray] = {}
     curves: dict[str, dict[str, list[np.ndarray]]] = {d: defaultdict(list) for d in dtypes}
+    random_by_shape: dict[tuple[str, tuple[int, int]], np.ndarray] = {}
+    random_curves: dict[str, list[np.ndarray]] = {d: [] for d in dtypes}
     for i, name in enumerate(names, 1):
         base = load_tensor(args.base, base_locations, name)
         tuned = load_tensor(args.finetuned, tuned_locations, name)
         for dtype in dtypes:
+            key = (dtype, tuple(base.shape))
+            if key not in random_by_shape:
+                random_by_shape[key] = random_baseline(key[1], SVD_DTYPES[dtype], device, args.max_k)
+            random_curves[dtype].append(random_by_shape[key])
             delta = tuned.to(device, SVD_DTYPES[dtype]) - base.to(device, SVD_DTYPES[dtype])
             singular = torch.linalg.svdvals(delta).double().cpu().numpy()
             spectra[f"{dtype}/{name}"] = singular
@@ -131,10 +158,14 @@ def main() -> None:
     for dtype in dtypes:
         print(f"\n[{dtype}] mean cumulative energy E(k) over layers")
         print(f"  {'kind':10s} " + " ".join(f"k={k:<6d}" for k in report_ks))
-        for kind in [k for k in KIND_ORDER if k in curves[dtype]]:
-            mean = np.stack(curves[dtype][kind]).mean(0)
+        rows = [(kind, np.stack(curves[dtype][kind])) for kind in KIND_ORDER if kind in curves[dtype]]
+        rows.append((ALL_LABEL, np.stack([c for kc in curves[dtype].values() for c in kc])))
+        rows.append(("random", np.stack(random_curves[dtype])))
+        for kind, stack in rows:
+            mean = stack.mean(0)
             print(f"  {kind:10s} " + " ".join(f"{mean[k]:<8.4f}" for k in report_ks))
-        plot_dtype(curves[dtype], dtype, args.max_k, title, args.output_dir / f"energy_spectrum_{dtype}.png")
+        plot_dtype(curves[dtype], random_curves[dtype], dtype, args.max_k, title,
+                   args.output_dir / f"energy_spectrum_{dtype}.png")
 
     if len(dtypes) > 1:
         ref = dtypes[0]
