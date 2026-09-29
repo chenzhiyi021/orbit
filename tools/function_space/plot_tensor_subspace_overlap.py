@@ -14,12 +14,13 @@ the tensor name before ".weight" (e.g. "down_proj", "gate_proj") -- and
 produces, per kind:
   - {kind}_subspace_overlap.png: one panel per side (left = output space,
     right = input space; their chance levels k/n differ). One line per model
-    pair, x = top-k (log2 scale), y = median sim_k across every tensor of that
-    kind found in the log (e.g. across all layers' down_proj), shaded band =
-    25-75% across those tensors, dashed black = uniform-random chance k/n.
+    pair, x = top-k (log2 scale), y = mean (default) or median (--stat) sim_k
+    across every tensor of that kind found in the log (e.g. across all layers'
+    down_proj), shaded band = 25-75% across those tensors, dashed black =
+    uniform-random chance k/n.
   - {kind}_{A}_vs_{B}_layers.png, per pair: layer x k heatmap of
     log10(observed/chance), so a single anomalous layer (hidden by the layer
-    mean above) stands out. Skipped when the log has only one layer.
+    statistic above) stands out. Skipped when the log has only one layer.
 Summary lines ("mean_sim_k=...") in the log are ignored; the plots recompute
 the layer statistics from the per-tensor lines.
 
@@ -125,11 +126,14 @@ def parse_log(path: Path) -> pd.DataFrame:
 SIDE_TITLES = {"left": "left singular vectors (output space)", "right": "right singular vectors (input space)"}
 
 
-def plot_kind(frame: pd.DataFrame, kind: str, output_path: Path) -> None:
-    """One panel per side (their chance levels differ): median sim_k over layers vs k, one line per
-    pair, interquartile band across layers, and the uniform-random chance level k/n dashed.
-    Median/IQR rather than mean/std: one anomalous layer inflates the std into a band that
-    dips below 0 (sim_k cannot); single layers are what plot_layer_heatmap is for."""
+def plot_kind(frame: pd.DataFrame, kind: str, output_path: Path, stat: str = "mean") -> None:
+    """One panel per side (their chance levels differ): `stat` (mean or median) of sim_k over
+    layers vs k, one line per pair, interquartile band across layers, and the uniform-random
+    chance level k/n dashed. Mean is the default because k/n is the chance *mean*: at small k
+    sim_k is right-skewed (k=1: Beta(1/2, (n-1)/2), median ~0.45 k/n), so a median line sits
+    below the dashed line even at chance. The band is the IQR rather than +/-std, which one
+    anomalous layer inflates below 0 (sim_k cannot); single layers are what plot_layer_heatmap
+    is for."""
     subset = frame[frame.kind == kind]
     pairs = list(subset[["left", "right"]].drop_duplicates().itertuples(index=False, name=None))
     colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
@@ -143,10 +147,10 @@ def plot_kind(frame: pd.DataFrame, kind: str, output_path: Path) -> None:
             if line.empty:
                 continue
             by_k = line.groupby("k")["sim_k"]
-            median, q25, q75 = by_k.median(), by_k.quantile(0.25), by_k.quantile(0.75)
+            center, q25, q75 = by_k.agg(stat), by_k.quantile(0.25), by_k.quantile(0.75)
             color = pair_color[pair]
-            ax.plot(median.index, median.values, marker="o", color=color, label=f"{pair[0]} vs {pair[1]}")
-            ax.fill_between(median.index, q25.values, q75.values, color=color, alpha=0.15)
+            ax.plot(center.index, center.values, marker="o", color=color, label=f"{pair[0]} vs {pair[1]}")
+            ax.fill_between(center.index, q25.values, q75.values, color=color, alpha=0.15)
         if subset.chance_source.eq("analytic").all():
             chance = side_rows.groupby("k")["chance_mean"].mean().sort_index()
             ax.plot(chance.index, chance.values, linestyle="--", color="black", label="chance k/n")
@@ -158,9 +162,9 @@ def plot_kind(frame: pd.DataFrame, kind: str, output_path: Path) -> None:
         ax.grid(alpha=0.3)
         ax.legend(fontsize=8)
     metric_label = "||Q^T Q'||_F^2 / k" if subset.metric.iloc[0] == "phi" else "||Q^T Q'||_F / sqrt(k)"
-    axes[0].set_ylabel(f"Median sim_k = {metric_label} across layers")
+    axes[0].set_ylabel(f"{stat.capitalize()} sim_k = {metric_label} across layers")
     n_tensors = subset["tensor"].drop_duplicates().shape[0]
-    fig.suptitle(f"{kind}: top singular subspace similarity (median, 25-75% band across {n_tensors} layers)")
+    fig.suptitle(f"{kind}: top singular subspace similarity ({stat}, 25-75% band across {n_tensors} layers)")
     fig.tight_layout()
     fig.savefig(output_path, dpi=170)
     plt.close(fig)
@@ -205,6 +209,8 @@ def main() -> None:
     parser.add_argument("--log", required=True, type=Path, action="append",
                          help="path to a saved subspace_overlap_profile.py transcript; repeat to merge multiple logs")
     parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--stat", default="mean", choices=("mean", "median"),
+                         help="per-k statistic of sim_k across layers drawn as the line (band is always 25-75%%)")
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -219,7 +225,7 @@ def main() -> None:
           f"kinds={sorted(frame.kind.unique())}")
 
     for kind in sorted(frame.kind.unique()):
-        plot_kind(frame, kind, args.output_dir / f"{kind}_subspace_overlap.png")
+        plot_kind(frame, kind, args.output_dir / f"{kind}_subspace_overlap.png", stat=args.stat)
         kind_pairs = frame[frame.kind == kind][["left", "right"]].drop_duplicates().itertuples(index=False, name=None)
         for pair in kind_pairs:
             plot_layer_heatmap(frame, kind, pair,
