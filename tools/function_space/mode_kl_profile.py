@@ -222,7 +222,8 @@ def main() -> None:
     frames = []
     started = time.perf_counter()
     for sample_index, key in enumerate(keys):
-        task, example_id, repetition = key.split("/")
+        # "<task>/<example_id>/<repetition>"; MATH500 ids contain "/" (e.g. test/precalculus/807.json)
+        example_id = key.split("/", 1)[1].rsplit("/", 1)[0]
         prompt = MATH_PROMPT.format(problem=problems[example_id])
         text = thinking_trace(rows[key]["output"])
         inputs, y_ids = {}, None
