@@ -1,14 +1,22 @@
-"""Keep a full fine-tune's weight update out of a fixed per-tensor subspace.
+"""Constrain a full fine-tune's weight update with a fixed per-tensor subspace.
 
-Used to ask whether the directions a previous fine-tune relied on are *necessary*: build
-per-tensor bases with tools/function_space/build_exclusion_subspace.py (top-k singular
-vectors of that fine-tune's Delta W, or random controls), then retrain with
---exclude-subspace-path / --exclude-subspace-k / --exclude-subspace-side.
+Bases come from tools/function_space/build_exclusion_subspace.py (top-k singular vectors of a
+previous fine-tune's Delta W, or Haar-random controls); retrain with --exclude-subspace-path /
+--exclude-subspace-k / --exclude-subspace-side / --exclude-subspace-mode. Two modes:
+
+  * exclude (default): keep the update OUT of the first k directions -- asks whether the
+    directions a previous fine-tune relied on are *necessary*;
+  * keep: allow the update ONLY inside them -- fixed-subspace training. With a Haar-random
+    basis, side=right is "fixed random input space, learned output" (frozen-A LoRA / LoRA-FA,
+    Zhu et al. 2024), side=left is its mirror "fixed random output space, learned input", and
+    side=both fixes both, leaving only a k x k core U_k^T D V_k.
 
 Mechanism (a reparametrization, so it is exact and optimizer-agnostic). With W the raw
-parameter the optimizer updates and P the projector that removes the excluded subspace,
+parameter the optimizer updates and P the projector of the chosen mode and side,
 
-    left:  P(D) = (I - U_k U_k^T) D        right: P(D) = D (I - V_k V_k^T)        both: both
+    exclude  left:  P(D) = (I - U_k U_k^T) D        right: P(D) = D (I - V_k V_k^T)
+    keep     left:  P(D) = U_k U_k^T D              right: P(D) = D V_k V_k^T
+    both: the left and right projectors applied together
 
 the network always runs with the effective weight  W_eff = W_base + P(W - W_base).
 Because P is linear and self-adjoint, dL/dW = P(dL/dW_eff), so:
@@ -20,7 +28,11 @@ Because P is linear and self-adjoint, dL/dW = P(dL/dW_eff), so:
   * after every optimizer step the (all-gathered) model parameters are overwritten with
     W_eff, so the rollout engine's weight sync, the next forward pass and every saved
     checkpoint all see the constrained weights. The fp32 master weights keep the raw W;
-    whatever Adam puts into the excluded subspace there is never used.
+    whatever Adam puts into the forbidden subspace there is never used.
+
+In keep mode Adam's moments live on the raw W (per coordinate, of the projected gradient), not
+on the k-dim coefficients of a LoRA-style factorization: the reachable updates are the same as
+frozen-A / frozen-B LoRA, the optimizer geometry is not.
 
 Layout: the bases are stored per HF tensor (q/k/v_proj, gate/up_proj separately), while
 Megatron fuses them into linear_qkv (rows interleaved per query group: the group's query
@@ -44,6 +56,7 @@ import torch
 logger = logging.getLogger(__name__)
 
 SIDES = ("left", "right", "both")
+MODES = ("exclude", "keep")
 _MEGATRON_RE = re.compile(
     r"decoder\.layers\.(\d+)\.(self_attention\.linear_qkv|self_attention\.linear_proj|mlp\.linear_fc1|mlp\.linear_fc2)\.weight$"
 )
@@ -93,14 +106,18 @@ def hf_blocks_for(kind: str, layer: int, num_heads: int, num_groups: int, head_d
     raise ValueError(kind)
 
 
-def project_(matrix: torch.Tensor, blocks: list[_Block], side: str) -> torch.Tensor:
-    """In place: remove each block's excluded subspace from its rows of `matrix` (fp32)."""
+def project_(matrix: torch.Tensor, blocks: list[_Block], side: str, mode: str = "exclude") -> torch.Tensor:
+    """In place: on each block's rows of `matrix` (fp32), remove the block's subspace
+    (mode="exclude") or keep only the component inside it (mode="keep")."""
+    keep = mode == "keep"
     for block in blocks:
         part = matrix if block.rows is None else matrix[block.rows]
         if side in ("left", "both"):
-            part = part - block.u @ (block.u.T @ part)
+            inside = block.u @ (block.u.T @ part)
+            part = inside if keep else part - inside
         if side in ("right", "both"):
-            part = part - (part @ block.v) @ block.v.T
+            inside = (part @ block.v) @ block.v.T
+            part = inside if keep else part - inside
         if block.rows is None:
             matrix.copy_(part)
         else:
@@ -119,6 +136,7 @@ class SubspaceExclusion:
         from safetensors import safe_open
 
         self.side = args.exclude_subspace_side
+        self.mode = args.exclude_subspace_mode
         self.k = args.exclude_subspace_k
         heads, groups = args.num_attention_heads, args.num_query_groups or args.num_attention_heads
         head_dim = args.kv_channels or args.hidden_size // args.num_attention_heads
@@ -156,8 +174,8 @@ class SubspaceExclusion:
         if not self.targets:
             raise RuntimeError("--exclude-subspace-path set but no linear_qkv/linear_proj/linear_fc1/linear_fc2 weights found")
         self._check_layout(args.hf_checkpoint)
-        logger.info("subspace exclusion: %d tensors, k=%d, side=%s, source=%s (kind=%s, k_max=%s)",
-                    len(self.targets), self.k, self.side, path, meta.get("kind"), meta.get("k_max"))
+        logger.info("subspace %s: %d tensors, k=%d, side=%s, source=%s (kind=%s, k_max=%s)",
+                    self.mode, len(self.targets), self.k, self.side, path, meta.get("kind"), meta.get("k_max"))
 
     def _check_layout(self, hf_dir: str) -> None:
         """At setup the parameters are the base model: rebuild a few fused matrices from the HF
@@ -201,7 +219,7 @@ class SubspaceExclusion:
             if grad is None:
                 continue
             g32 = grad.float()
-            project_(g32, _blocks_on(target.blocks, g32.device), self.side)
+            project_(g32, _blocks_on(target.blocks, g32.device), self.side, self.mode)
             grad.copy_(g32)
 
     @torch.no_grad()
@@ -210,18 +228,19 @@ class SubspaceExclusion:
             device = target.param.device
             base32 = target.base.to(device, non_blocking=True).float()
             delta = target.param.data.float() - base32
-            project_(delta, _blocks_on(target.blocks, device), self.side)
+            project_(delta, _blocks_on(target.blocks, device), self.side, self.mode)
             target.param.data.copy_((base32 + delta).to(target.param.dtype))
             del base32, delta
 
     @torch.no_grad()
     def excluded_fraction(self) -> float:
-        """||delta inside the excluded subspace||^2 / ||delta||^2 over all targets (should stay ~0)."""
+        """||delta - P(delta)||^2 / ||delta||^2 over all targets: the update's share in the
+        forbidden subspace (should stay ~0)."""
         inside, total = 0.0, 0.0
         for target in self.targets:
             device = target.param.device
             delta = target.param.data.float() - target.base.to(device).float()
-            kept = project_(delta.clone(), _blocks_on(target.blocks, device), self.side)
+            kept = project_(delta.clone(), _blocks_on(target.blocks, device), self.side, self.mode)
             total += float(delta.pow(2).sum())
             inside += float((delta - kept).pow(2).sum())
         return inside / total if total > 0 else 0.0
@@ -246,6 +265,8 @@ def validate(args) -> None:
         problems.append("--peft-method must be none (this constrains full fine-tuning)")
     if args.exclude_subspace_side not in SIDES:
         problems.append(f"--exclude-subspace-side must be one of {SIDES}")
+    if getattr(args, "exclude_subspace_mode", "exclude") not in MODES:
+        problems.append(f"--exclude-subspace-mode must be one of {MODES}")
     if args.exclude_subspace_k < 1:
         problems.append("--exclude-subspace-k must be >= 1")
     if problems:

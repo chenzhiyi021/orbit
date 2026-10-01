@@ -23,6 +23,9 @@
 #
 #   EXCLUDE_K=64 EXCLUDE_SIDE=both bash .../run-m6-opd-st-non-thinking-full-exclude-subspace.sh
 #   EXCLUDE_SUBSPACE_PATH=/.../random_top256_seed0.safetensors EXCLUDE_TAG=random EXCLUDE_K=64 bash ...
+#
+# EXCLUDE_MODE=keep turns this into fixed-subspace training (the update may only live inside the
+# first EXCLUDE_K directions); run-m6-opd-st-non-thinking-full-fixed-subspace.sh wraps that case.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,9 +38,14 @@ EXCLUDE_SUBSPACE_PATH="${EXCLUDE_SUBSPACE_PATH:-/mnt/L202500431/models/exclusion
 EXCLUDE_K="${EXCLUDE_K:-64}"
 EXCLUDE_SIDE="${EXCLUDE_SIDE:-both}"          # left (output space) | right (input space) | both
 EXCLUDE_TAG="${EXCLUDE_TAG:-reasontop}"       # names the run: reasontop | random | ...
+EXCLUDE_MODE="${EXCLUDE_MODE:-exclude}"       # exclude (update kept out) | keep (update kept inside)
 
 # === Recipe identity ===
-LAUNCHER_NAME="m6_opd_st_full_non_thinking_excl_${EXCLUDE_TAG}_k${EXCLUDE_K}_${EXCLUDE_SIDE}"
+case "${EXCLUDE_MODE}" in
+    exclude) LAUNCHER_NAME="m6_opd_st_full_non_thinking_excl_${EXCLUDE_TAG}_k${EXCLUDE_K}_${EXCLUDE_SIDE}" ;;
+    keep)    LAUNCHER_NAME="m6_opd_st_full_non_thinking_fixed_${EXCLUDE_TAG}_k${EXCLUDE_K}_${EXCLUDE_SIDE}" ;;
+    *) echo "[$(basename "${BASH_SOURCE[0]}")] ERROR: EXCLUDE_MODE must be exclude or keep, got ${EXCLUDE_MODE}" >&2; exit 1 ;;
+esac
 WANDB_PROJECT=${WANDB_PROJECT:-orbit-adapt}
 WANDB_GROUP=${WANDB_GROUP:-${LAUNCHER_NAME}}
 PRECISION_PROFILE=bf16
@@ -208,6 +216,7 @@ MISC_ARGS=(
     --exclude-subspace-path "${EXCLUDE_SUBSPACE_PATH}"
     --exclude-subspace-k "${EXCLUDE_K}"
     --exclude-subspace-side "${EXCLUDE_SIDE}"
+    --exclude-subspace-mode "${EXCLUDE_MODE}"
 )
 
 DEBUG_ARGS=( --log-passrate )

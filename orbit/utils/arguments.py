@@ -2436,6 +2436,17 @@ def get_orbit_extra_args_provider(add_custom_arguments=None):
                 help="Exclude the output-space (left, U), input-space (right, V) directions, or both.",
             )
             parser.add_argument(
+                "--exclude-subspace-mode",
+                type=str,
+                default="exclude",
+                choices=["exclude", "keep"],
+                help=(
+                    "exclude: keep the update out of the first --exclude-subspace-k basis directions. "
+                    "keep: allow the update only inside them (fixed-subspace training; with a random basis, "
+                    "side=right fixes a random input space, side=left a random output space)."
+                ),
+            )
+            parser.add_argument(
                 "--use-rollout-logprobs",
                 action="store_true",
                 default=False,
