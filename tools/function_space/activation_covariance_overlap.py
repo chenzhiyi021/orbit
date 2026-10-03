@@ -58,7 +58,7 @@ from svd_rank_profile import CANONICAL_RE, load_tensor, tensor_locations
 
 # Default prompt data: the M6 OPD launchers' TRAIN_JSONL default
 # (examples/on_policy_distillation/unified_300step_constant/run-m6-opd-st-non-thinking-full.sh).
-DEFAULT_DATA = "/mnt/L202500430/orbit/data/openreasoning_mixed_100k/train_qa.parquet"
+DEFAULT_DATA = "/mnt/L202500431/datasets/openreasoning_mixed_100k/train.parquet"
 DEFAULT_INPUT_KEY = "messages"
 
 ACT_COV_NAME = "act_cov"
