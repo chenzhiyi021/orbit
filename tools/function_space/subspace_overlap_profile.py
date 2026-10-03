@@ -31,13 +31,20 @@ o/down both write to the residual stream, other size-matched left pairs (e.g. q 
 unrelated spaces and serve as chance controls. With --compare-base the same is done for the
 base weights themselves ("W_base.kind_a vs W_base.kind_b").
 
+--localization asks whether that shared structure is a few fixed coordinates (outlier /
+massive-activation dimensions of the residual stream) rather than spread-out directions: for
+singular vectors 1..--loc-rank of every delta (and W_base with --compare-base) it prints the
+IPR sum_i v_i^4 (chance 3/(n+2) for a random unit vector, 1 = a single coordinate) and the top
+coordinates, then summarises mean IPR per kind and which residual-stream coordinates (right
+side of q/k/v/gate/up, left side of o/down) recur most often across layers and kinds.
+
 CPU-only, no model reload -- reuses svd_rank_profile.py's tensor I/O.
 
 Usage:
     python subspace_overlap_profile.py --base /mnt/L202500431/models/qwen3-1.7b \\
         --checkpoint oracle=/mnt/.../m6_coord_mask_1p6pct_oracle_step300 \\
         --checkpoint random=/mnt/.../m6_coord_mask_1p6pct_random_step300 \\
-        --k 4,8,16,32,64,128,256 [--compare-base] [--cross-kind]
+        --k 4,8,16,32,64,128,256 [--compare-base] [--cross-kind] [--localization]
 """
 from __future__ import annotations
 
@@ -45,7 +52,7 @@ import argparse
 import itertools
 import statistics
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import torch
@@ -150,6 +157,71 @@ def format_summary_line(side: str, k: int, sims: list[float], n: int) -> str:
             f"observed/chance={multiple:.2f}x  (n_tensors={len(sims)})")
 
 
+# (kind, side) pairs whose space is the residual stream (hidden_size coordinates): what
+# q/k/v/gate/up read (after their RMSNorm) and what o/down write. --localization pools
+# coordinate hits over these, since only there do coordinate indices mean the same thing.
+RESIDUAL_SIDES = {("q_proj", "right"), ("k_proj", "right"), ("v_proj", "right"),
+                  ("gate_proj", "right"), ("up_proj", "right"),
+                  ("o_proj", "left"), ("down_proj", "left")}
+LOC_TOP_COORDS = 5
+# A top coordinate only counts as a residual "hit" if it carries >= LOC_HIT_FACTOR x its uniform
+# share 1/n of the vector's mass -- otherwise a fully localized vector's near-zero runners-up
+# (arbitrary ties) would be counted.
+LOC_HIT_FACTOR = 10.0
+
+
+def vector_localization(vec: torch.Tensor) -> tuple[float, list[int], list[float]]:
+    """IPR = sum_i v_i^4 of a unit vector (1/n fully spread .. 1 one coordinate), plus its
+    LOC_TOP_COORDS largest coordinates by v_i^2 (singular vectors are sign-ambiguous)."""
+    mass = vec.double().pow(2)
+    mass = mass / mass.sum()
+    top = torch.topk(mass, min(LOC_TOP_COORDS, mass.numel()))
+    return float(mass.pow(2).sum()), top.indices.tolist(), top.values.tolist()
+
+
+def ipr_chance(n: int) -> float:
+    """E[sum_i v_i^4] for a uniformly random unit vector in R^n."""
+    return 3.0 / (n + 2)
+
+
+def format_localization_line(model: str, side: str, r: int, ipr: float, n: int,
+                             top_idx: list[int], top_mass: list[float]) -> str:
+    """Starts with "loc", so the plot_*_overlap.py parsers (which match "sim_k=") skip it."""
+    coords = ", ".join(f"{i}:{m:.3f}" for i, m in zip(top_idx, top_mass))
+    return (f"    loc {model} {side:<5} r={r:<2} ipr={ipr:.4f}  ipr/chance={ipr / ipr_chance(n):.1f}x  "
+            f"top{len(top_idx)}_mass={sum(top_mass):.3f}  top=[{coords}]")
+
+
+def print_localization_summary(loc_iprs: dict[tuple, list[float]], residual_hits: dict[str, Counter],
+                               residual_hit_kinds: dict[str, dict[int, Counter]],
+                               residual_slots: Counter, n_show: int = 15) -> None:
+    print("##### localization: mean IPR over layers, per tensor kind (chance = 3/(n+2)) #####\n")
+    kinds = sorted({key[0] for key in loc_iprs},
+                   key=lambda kind: KIND_ORDER.index(kind) if kind in KIND_ORDER else len(KIND_ORDER))
+    for kind in kinds:
+        print(f"=== localization summary: {kind} ===")
+        for key in (key for key in loc_iprs if key[0] == kind):
+            _, model, side, r, n_dim = key
+            mean_ipr = statistics.mean(loc_iprs[key])
+            print(f"    {model:<12} {side:<5} r={r:<2} mean_ipr={mean_ipr:.4f}  "
+                  f"ipr/chance={mean_ipr / ipr_chance(n_dim):.1f}x  (n_tensors={len(loc_iprs[key])})")
+        print()
+    if not residual_slots:
+        return
+    print(f"##### localization: residual-stream coordinates most often among the top-{LOC_TOP_COORDS} "
+          f"of a singular vector with >= {LOC_HIT_FACTOR:g}/n of its mass "
+          f"(q/k/v/gate/up right, o/down left) #####\n")
+    for model, slots in residual_slots.items():
+        # Chance count per coordinate: each slot draws LOC_TOP_COORDS of the hidden_size coordinates.
+        print(f"  -- {model}  ({slots} singular vectors; a coordinate in every one = {slots}) --")
+        for coord, hits in residual_hits[model].most_common(n_show):
+            by_kind = " ".join(f"{kind.replace('_proj', '')}:{count}"
+                               for kind, count in sorted(residual_hit_kinds[model][coord].items(),
+                                                         key=lambda item: KIND_ORDER.index(item[0])))
+            print(f"    coord {coord:<5} hits={hits:<5} ({hits / slots:.1%})  [{by_kind}]")
+        print()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base", required=True, type=Path)
@@ -165,6 +237,11 @@ def main() -> None:
     parser.add_argument("--cross-kind", action="store_true",
                          help="also compare, within each layer and checkpoint, the top-k subspaces of different "
                               "tensor kinds on every side whose dimensions match (e.g. q_proj vs k_proj input space)")
+    parser.add_argument("--localization", action="store_true",
+                         help="also report how concentrated on few coordinates each top singular vector is (IPR, "
+                              "top coordinates), and which residual-stream coordinates recur across tensors")
+    parser.add_argument("--loc-rank", type=int, default=4,
+                         help="--localization inspects singular vectors 1..loc-rank of every delta / base weight")
     parser.add_argument("--device", default="cpu",
                          help="where the deltas, SVDs and overlaps are computed, e.g. 'cpu' or 'cuda' / 'cuda:1'; "
                               "the same torch.linalg.svd call dispatches to LAPACK or cuSOLVER")
@@ -196,6 +273,13 @@ def main() -> None:
     # kind but different shapes never share a chance baseline.
     per_kind_sims: dict[tuple, list[float]] = defaultdict(list)
     max_k = max(k_values)
+    if args.localization and args.loc_rank > max_k:
+        raise ValueError(f"--loc-rank {args.loc_rank} exceeds the largest --k {max_k}")
+    # --localization: (kind, model, side, r, n) -> IPR per tensor; residual-stream coordinate hit counts.
+    loc_iprs: dict[tuple, list[float]] = defaultdict(list)
+    residual_hits: dict[str, Counter] = defaultdict(Counter)
+    residual_hit_kinds: dict[str, dict[int, Counter]] = defaultdict(lambda: defaultdict(Counter))
+    residual_slots: Counter = Counter()
     # --cross-kind: kind -> model -> side -> top-max_k basis (cloned, so the full SVD factors are
     # freed), plus kind -> shape; emptied once the layer's cross-kind block is printed.
     layer_bases: dict[str, dict[str, dict[str, torch.Tensor]]] = {}
@@ -259,6 +343,23 @@ def main() -> None:
                     if tensor_kind(tensor_name) in summary_kinds:
                         per_kind_sims[(tensor_kind(tensor_name), left_name, right_name, side, k, n_dim)].append(sim)
         print()
+        if args.localization:
+            kind = tensor_kind(tensor_name)
+            for model, model_bases in bases.items():
+                for side, n_dim in (("left", n_out), ("right", n_in)):
+                    vectors = model_bases[side][max_k]
+                    for r in range(min(args.loc_rank, vectors.shape[1])):
+                        ipr, top_idx, top_mass = vector_localization(vectors[:, r])
+                        print(format_localization_line(model, side, r + 1, ipr, n_dim, top_idx, top_mass))
+                        loc_iprs[(kind, model, side, r + 1, n_dim)].append(ipr)
+                        if (kind, side) in RESIDUAL_SIDES:
+                            residual_slots[model] += 1
+                            for coord, coord_mass in zip(top_idx, top_mass):
+                                if coord_mass < LOC_HIT_FACTOR / n_dim:
+                                    continue
+                                residual_hits[model][coord] += 1
+                                residual_hit_kinds[model][coord][kind] += 1
+            print()
         if args.cross_kind and layer is not None:
             layer_shapes[tensor_kind(tensor_name)] = (n_out, n_in)
             layer_bases[tensor_kind(tensor_name)] = {
@@ -271,6 +372,8 @@ def main() -> None:
         flush_cross_kind(current_layer)
 
     print(f"##### per-tensor profiling took {time.perf_counter() - started:.1f}s on {device} #####\n", flush=True)
+    if args.localization:
+        print_localization_summary(loc_iprs, residual_hits, residual_hit_kinds, residual_slots)
     if not per_kind_sims:
         return
     print("##### mean +/- std over layers, per tensor kind #####\n")
