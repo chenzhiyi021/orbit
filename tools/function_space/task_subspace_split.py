@@ -23,6 +23,15 @@ and their enrichment over chance. Prediction under "the task's activations decid
 math deltas are enriched in math-specific directions, writing deltas in writing-specific ones,
 and both in the shared ones.
 
+--export-dir writes each bucket as a remove_delta_subspace.py --subspace file, for ablations:
+    <A>_only.safetensors, <B>_only.safetensors, shared.safetensors
+    random_like_<A>_only.safetensors, random_like_shared.safetensors   (Haar-random, same dimension
+                                                                        per layer and input group)
+keyed "<hf tensor name>.V" (n_in, width) for every q/k/v/o/gate/up/down weight, the bucket basis of
+the tensor's layer and input group zero-padded to one width (zero columns leave the projection
+unchanged), and "<name>.U" as a zero (n_out, 1) placeholder: these are input-side bases, so use them
+with --side right and --k <the file's k_max>.
+
 Usage:
     python task_subspace_split.py --base /mnt/L202500431/models/qwen3-1.7b \\
         --eig-a math=actcov_eig_math_t07.safetensors --eig-b writing=actcov_eig_writing_t07.safetensors \\
@@ -48,6 +57,7 @@ from subspace_overlap_profile import (
     tensor_kind,
     top_k_bases,
 )
+from build_exclusion_subspace import random_orthonormal
 from svd_rank_profile import CANONICAL_RE, load_tensor, tensor_locations
 
 BASE_W_NAME = "W_base"
@@ -75,6 +85,52 @@ def split_subspaces(e_a: torch.Tensor, e_b: torch.Tensor, shared_cos2: float,
     return {"shared": bisect, "a": u_a[:, specific], "b": u_b[:, specific]}, cos2
 
 
+def export_buckets(args, buckets: dict[tuple[int, str], dict[str, torch.Tensor]],
+                   base_locations: dict[str, Path], groups: list[str], names: dict[str, str]) -> None:
+    """Write every bucket, plus random controls matched to the a-only and shared dimensions."""
+    from safetensors.torch import save_file
+
+    generator = torch.Generator().manual_seed(args.seed)
+    tensor_names = [name for name in all_target_tensors(base_locations) if GROUP_OF_KIND[tensor_kind(name)] in groups]
+    shapes = {}
+    for name in tensor_names:
+        with safe_open(str(base_locations[name]), framework="pt") as handle:
+            shapes[name] = tuple(handle.get_slice(name).get_shape())
+    random_bases = {}  # (layer, group, source bucket) -> basis, shared by the tensors of one group
+    for (layer, group), layer_buckets in buckets.items():
+        for source in ("a", "shared"):
+            n, d = layer_buckets[source].shape
+            random_bases[(layer, group, source)] = random_orthonormal(n, d, generator) if d else layer_buckets[source][:, :0].cpu()
+    outputs = {"shared": "shared", "a": f"{names['a']}_only", "b": f"{names['b']}_only",
+               "random_a": f"random_like_{names['a']}_only", "random_shared": "random_like_shared"}
+    args.export_dir.mkdir(parents=True, exist_ok=True)
+    for bucket, stem in outputs.items():
+        per_tensor = {}
+        for name in tensor_names:
+            layer, group = int(CANONICAL_RE.match(name).group(1)), GROUP_OF_KIND[tensor_kind(name)]
+            if bucket.startswith("random_"):
+                per_tensor[name] = random_bases[(layer, group, bucket.removeprefix("random_"))]
+            else:
+                per_tensor[name] = buckets[(layer, group)][bucket].float().cpu()
+        width = max(1, max(basis.shape[1] for basis in per_tensor.values()))
+        tensors = {}
+        for name, basis in per_tensor.items():
+            padded = torch.zeros(basis.shape[0], width)
+            padded[:, :basis.shape[1]] = basis
+            tensors[f"{name}.V"] = padded.contiguous()
+            tensors[f"{name}.U"] = torch.zeros(shapes[name][0], 1)
+        dims = [basis.shape[1] for basis in per_tensor.values()]
+        metadata = {"k_max": str(width), "kind": f"task_split_{stem}", "side": "right",
+                    "eig_a": args.eig_a, "eig_b": args.eig_b, "k": str(args.k),
+                    "shared_cos2": str(args.shared_cos2), "specific_cos2": str(args.specific_cos2),
+                    "seed": str(args.seed)}
+        path = args.export_dir / f"{stem}.safetensors"
+        save_file(tensors, str(path), metadata=metadata)
+        print(f"exported {stem}: {len(per_tensor)} tensors, dims {min(dims)}..{max(dims)} "
+              f"(mean {statistics.mean(dims):.1f}), k_max={width} -> {path}", flush=True)
+    print(flush=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base", required=True, type=Path)
@@ -85,6 +141,10 @@ def main() -> None:
     parser.add_argument("--shared-cos2", type=float, default=0.5)
     parser.add_argument("--specific-cos2", type=float, default=0.1)
     parser.add_argument("--groups", default="attn_in,o_in,mlp_in,down_in")
+    parser.add_argument("--export-dir", type=Path, default=None,
+                         help="also write each bucket (and dimension-matched random controls) as a "
+                              "remove_delta_subspace.py --subspace file")
+    parser.add_argument("--seed", type=int, default=0, help="seed of the random control bases")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--svd-dtype", default="float32", choices=tuple(SVD_DTYPES))
     args = parser.parse_args()
@@ -132,8 +192,11 @@ def main() -> None:
               f"largest principal cos^2 {mean('cos2_1'):.3f})")
     print(flush=True)
 
-    # 2. Where each delta (and W) puts its input-side energy and its top directions.
     base_locations = tensor_locations(args.base)
+    if args.export_dir is not None:
+        export_buckets(args, buckets, base_locations, groups, {"a": name_a, "b": name_b})
+
+    # 2. Where each delta (and W) puts its input-side energy and its top directions.
     ckpt_locations = {name: tensor_locations(path) for name, path in checkpoints.items()}
     tensor_names = [name for name in all_target_tensors(base_locations) if GROUP_OF_KIND[tensor_kind(name)] in groups]
     stats: dict[tuple, list[float]] = defaultdict(list)  # (kind, model, bucket, metric) -> per layer
