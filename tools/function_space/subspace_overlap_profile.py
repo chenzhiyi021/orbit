@@ -13,7 +13,23 @@ random (Haar) k-subspaces of R^n, E[sim_k] = k / n .
 
 --compare-base additionally reports, per checkpoint, sim_k between its delta
 and the base weight W's own top-k singular subspace (pair label "W_base";
-the question LoRA Sec. 7.3 asks of Delta W vs W). 
+the question LoRA Sec. 7.3 asks of Delta W vs W).
+
+--cross-kind additionally compares, within each layer and each checkpoint, the deltas of two
+different tensor kinds on every side where their dimensions match (pair label
+"NAME.kind_a vs NAME.kind_b", pseudo-tensor "model.layers.L.cross.kind_a~kind_b.weight", so
+plot_tensor_subspace_overlap.py plots each kind pair like a kind). This tests whether delta
+structure is set by the layer's input activations: grad_W = E[delta x^T] puts the right
+singular vectors of an SGD delta in the span of the inputs x (Adam only approximately), so
+kinds that READ THE SAME INPUT should share right subspaces:
+    q/k/v_proj      input_layernorm(h)            -- same input
+    gate/up_proj    post_attention_layernorm(h)   -- same input
+    q vs gate etc.  residual stream before/after attention -- related, not identical
+    o_proj          attention output              -- different input (control)
+Left sides that match in size are reported too; gate/up share neuron coordinates and
+o/down both write to the residual stream, other size-matched left pairs (e.g. q vs o) live in
+unrelated spaces and serve as chance controls. With --compare-base the same is done for the
+base weights themselves ("W_base.kind_a vs W_base.kind_b").
 
 CPU-only, no model reload -- reuses svd_rank_profile.py's tensor I/O.
 
@@ -21,7 +37,7 @@ Usage:
     python subspace_overlap_profile.py --base /mnt/L202500431/models/qwen3-1.7b \\
         --checkpoint oracle=/mnt/.../m6_coord_mask_1p6pct_oracle_step300 \\
         --checkpoint random=/mnt/.../m6_coord_mask_1p6pct_random_step300 \\
-        --k 4,8,16,32,64,128,256 [--compare-base]
+        --k 4,8,16,32,64,128,256 [--compare-base] [--cross-kind]
 """
 from __future__ import annotations
 
@@ -146,6 +162,9 @@ def main() -> None:
     parser.add_argument("--compare-base", action="store_true",
                          help=f"also compare each checkpoint's delta with the base weight's own top-k "
                               f"singular subspace (pair label '{BASE_W_NAME}')")
+    parser.add_argument("--cross-kind", action="store_true",
+                         help="also compare, within each layer and checkpoint, the top-k subspaces of different "
+                              "tensor kinds on every side whose dimensions match (e.g. q_proj vs k_proj input space)")
     parser.add_argument("--device", default="cpu",
                          help="where the deltas, SVDs and overlaps are computed, e.g. 'cpu' or 'cuda' / 'cuda:1'; "
                               "the same torch.linalg.svd call dispatches to LAPACK or cuSOLVER")
@@ -176,11 +195,49 @@ def main() -> None:
     # (kind, left, right, side, k, n) -> sim_k per tensor; n is in the key so tensors of one
     # kind but different shapes never share a chance baseline.
     per_kind_sims: dict[tuple, list[float]] = defaultdict(list)
+    max_k = max(k_values)
+    # --cross-kind: kind -> model -> side -> top-max_k basis (cloned, so the full SVD factors are
+    # freed), plus kind -> shape; emptied once the layer's cross-kind block is printed.
+    layer_bases: dict[str, dict[str, dict[str, torch.Tensor]]] = {}
+    layer_shapes: dict[str, tuple[int, int]] = {}
+    current_layer = None
+
+    def flush_cross_kind(layer: int) -> None:
+        kinds = sorted(layer_bases, key=KIND_ORDER.index)
+        for kind_a, kind_b in itertools.combinations(kinds, 2):
+            shape_a, shape_b = layer_shapes[kind_a], layer_shapes[kind_b]
+            sides = [(side, shape_a[dim]) for dim, side in enumerate(("left", "right"))
+                     if shape_a[dim] == shape_b[dim]]
+            if not sides:
+                continue
+            cross_kind = f"{kind_a}~{kind_b}"
+            print(f"=== model.layers.{layer}.cross.{cross_kind}.weight  "
+                  f"(shape ({kind_a}={shape_a[0]}x{shape_a[1]}, {kind_b}={shape_b[0]}x{shape_b[1]})) ===")
+            for model in layer_bases[kind_a]:
+                left_label, right_label = f"{model}.{kind_a}", f"{model}.{kind_b}"
+                print(f"  -- {left_label} vs {right_label} --")
+                for side, n_dim in sides:
+                    basis_a, basis_b = layer_bases[kind_a][model][side], layer_bases[kind_b][model][side]
+                    for k in k_values:
+                        if k > min(basis_a.shape[1], basis_b.shape[1]):
+                            continue
+                        sim = subspace_sim(basis_a[:, :k], basis_b[:, :k])
+                        print(format_sim_line(side, k, sim, n_dim))
+                        if kind_a in summary_kinds and kind_b in summary_kinds:
+                            per_kind_sims[(cross_kind, left_label, right_label, side, k, n_dim)].append(sim)
+            print()
+        layer_bases.clear()
+        layer_shapes.clear()
 
     for tensor_name in tensor_names:
+        layer = int(CANONICAL_RE.match(tensor_name).group(1)) if CANONICAL_RE.match(tensor_name) else None
+        if args.cross_kind and layer != current_layer:
+            if current_layer is not None:
+                flush_cross_kind(current_layer)
+            current_layer = layer
         base_tensor = load_tensor(args.base, base_locations, tensor_name).to(device, svd_dtype)
         n_out, n_in = base_tensor.shape
-        print(f"=== {tensor_name}  (shape {tuple(base_tensor.shape)}) ===")
+        print(f"=== {tensor_name}  (shape {tuple(base_tensor.shape)}) ===", flush=True)
         deltas = {}
         for name, path in checkpoints.items():
             other = load_tensor(path, ckpt_locations[name], tensor_name).to(device, svd_dtype)
@@ -202,13 +259,24 @@ def main() -> None:
                     if tensor_kind(tensor_name) in summary_kinds:
                         per_kind_sims[(tensor_kind(tensor_name), left_name, right_name, side, k, n_dim)].append(sim)
         print()
+        if args.cross_kind and layer is not None:
+            layer_shapes[tensor_kind(tensor_name)] = (n_out, n_in)
+            layer_bases[tensor_kind(tensor_name)] = {
+                model: {side: basis[max_k].clone() for side, basis in model_bases.items()}
+                for model, model_bases in bases.items()
+            }
+        del bases
+
+    if args.cross_kind and current_layer is not None:
+        flush_cross_kind(current_layer)
 
     print(f"##### per-tensor profiling took {time.perf_counter() - started:.1f}s on {device} #####\n", flush=True)
     if not per_kind_sims:
         return
     print("##### mean +/- std over layers, per tensor kind #####\n")
     kinds = list(dict.fromkeys(key[0] for key in per_kind_sims))
-    kinds.sort(key=lambda kind: KIND_ORDER.index(kind) if kind in KIND_ORDER else len(KIND_ORDER))
+    kinds.sort(key=lambda kind: (KIND_ORDER.index(kind.split("~")[0]) if kind.split("~")[0] in KIND_ORDER
+                                 else len(KIND_ORDER), "~" in kind, kind))
     for kind in kinds:
         keys = [key for key in per_kind_sims if key[0] == kind]
         print(f"=== summary: {kind} ===")
