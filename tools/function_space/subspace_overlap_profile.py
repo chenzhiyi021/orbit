@@ -63,6 +63,9 @@ from svd_rank_profile import CANONICAL_RE, load_tensor, tensor_locations
 BASE_W_NAME = "W_base"
 
 KIND_ORDER = ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
+# Input group (whose activation second moment activation_covariance_overlap.py measures) per kind.
+GROUP_OF_KIND = {"q_proj": "attn_in", "k_proj": "attn_in", "v_proj": "attn_in", "o_proj": "o_in",
+                 "gate_proj": "mlp_in", "up_proj": "mlp_in", "down_proj": "down_in"}
 
 
 def tensor_kind(tensor_name: str) -> str:
@@ -127,6 +130,16 @@ def subspace_sim(a: torch.Tensor, b: torch.Tensor) -> float:
     if k == 0:
         return float("nan")
     return float(torch.linalg.norm(a.transpose(0, 1) @ b) ** 2 / k)
+
+
+def eig_basis(handle, tensor_name: str, k: int) -> torch.Tensor:
+    """Top-k input-activation eigenvectors (n_in, k) for this tensor's layer and input group."""
+    layer = int(CANONICAL_RE.match(tensor_name).group(1))
+    key = f"layers.{layer}.{GROUP_OF_KIND[tensor_kind(tensor_name)]}.eigvecs"
+    vectors = handle.get_tensor(key)
+    if k > vectors.shape[1]:
+        raise ValueError(f"--project-out-k {k} > the {vectors.shape[1]} eigenvectors saved under {key}")
+    return vectors[:, :k]
 
 
 def chance_mean(n: int, k: int) -> float:
@@ -237,6 +250,11 @@ def main() -> None:
     parser.add_argument("--cross-kind", action="store_true",
                          help="also compare, within each layer and checkpoint, the top-k subspaces of different "
                               "tensor kinds on every side whose dimensions match (e.g. q_proj vs k_proj input space)")
+    parser.add_argument("--project-out-eig", type=Path, default=None,
+                         help="activation_covariance_overlap.py --save-eig file: before any SVD, remove from every "
+                              "delta (not W_base) its input-side component in the layer's top --project-out-k "
+                              "activation eigenvectors, D <- D (I - E E^T), to compare what is left")
+    parser.add_argument("--project-out-k", type=int, default=256)
     parser.add_argument("--localization", action="store_true",
                          help="also report how concentrated on few coordinates each top singular vector is (IPR, "
                               "top coordinates), and which residual-stream coordinates recur across tensors")
@@ -264,6 +282,13 @@ def main() -> None:
     k_values = [int(k.strip()) for k in args.k.split(",") if k.strip()]
     base_locations = tensor_locations(args.base)
     tensor_names, summary_kinds = resolve_targets(args.tensors, base_locations)
+    eig_handle = None
+    if args.project_out_eig is not None:
+        from safetensors import safe_open
+
+        eig_handle = safe_open(str(args.project_out_eig), framework="pt")
+        print(f"projecting deltas off the top-{args.project_out_k} input-activation eigenvectors in "
+              f"{args.project_out_eig}", flush=True)
     print(f"profiling {len(tensor_names)} tensors, k={k_values}, device={device}, svd_dtype={args.svd_dtype}, "
           f"analytic chance baseline\n",
           flush=True)
@@ -326,6 +351,12 @@ def main() -> None:
         for name, path in checkpoints.items():
             other = load_tensor(path, ckpt_locations[name], tensor_name).to(device, svd_dtype)
             deltas[name] = other - base_tensor
+            if eig_handle is not None:
+                basis = eig_basis(eig_handle, tensor_name, args.project_out_k).to(device, svd_dtype)
+                full = torch.linalg.norm(deltas[name]) ** 2
+                deltas[name] = deltas[name] - (deltas[name] @ basis) @ basis.transpose(0, 1)
+                print(f"  projected out top-{basis.shape[1]} act eigvecs from {name}: kept energy "
+                      f"{float(torch.linalg.norm(deltas[name]) ** 2 / full):.4f}")
         bases = {name: top_k_bases(delta, k_values, svd_dtype) for name, delta in deltas.items()}
         pairs = list(itertools.combinations(checkpoints, 2))
         if args.compare_base:
