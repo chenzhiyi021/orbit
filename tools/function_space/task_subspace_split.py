@@ -27,6 +27,9 @@ and both in the shared ones.
     <A>_only.safetensors, <B>_only.safetensors, shared.safetensors
     random_like_<A>_only.safetensors, random_like_shared.safetensors   (Haar-random, same dimension
                                                                         per layer and input group)
+    top_energy_<A>_like_shared.safetensors        A's top-d eigenvectors, d = that layer/group's
+                                                  shared dimension (is it energy, not sharing?)
+    random_in_<A>_top<k>_like_shared.safetensors  random d-dim subspace inside span(E_A top-k)
 keyed "<hf tensor name>.V" (n_in, width) for every q/k/v/o/gate/up/down weight, the bucket basis of
 the tensor's layer and input group zero-padded to one width (zero columns leave the projection
 unchanged), and "<name>.U" as a zero (n_out, 1) placeholder: these are input-side bases, so use them
@@ -86,8 +89,10 @@ def split_subspaces(e_a: torch.Tensor, e_b: torch.Tensor, shared_cos2: float,
 
 
 def export_buckets(args, buckets: dict[tuple[int, str], dict[str, torch.Tensor]],
-                   base_locations: dict[str, Path], groups: list[str], names: dict[str, str]) -> None:
-    """Write every bucket, plus random controls matched to the a-only and shared dimensions."""
+                   base_locations: dict[str, Path], groups: list[str], names: dict[str, str],
+                   energy_controls: dict[tuple[int, str], dict[str, torch.Tensor]]) -> None:
+    """Write every bucket, random controls matched to the a-only and shared dimensions, and the
+    shared-dimension-matched energy controls (top eigenvectors of A, random inside A's top-k)."""
     from safetensors.torch import save_file
 
     generator = torch.Generator().manual_seed(args.seed)
@@ -102,13 +107,17 @@ def export_buckets(args, buckets: dict[tuple[int, str], dict[str, torch.Tensor]]
             n, d = layer_buckets[source].shape
             random_bases[(layer, group, source)] = random_orthonormal(n, d, generator) if d else layer_buckets[source][:, :0].cpu()
     outputs = {"shared": "shared", "a": f"{names['a']}_only", "b": f"{names['b']}_only",
-               "random_a": f"random_like_{names['a']}_only", "random_shared": "random_like_shared"}
+               "random_a": f"random_like_{names['a']}_only", "random_shared": "random_like_shared",
+               "energy_top": f"top_energy_{names['a']}_like_shared",
+               "energy_rand_in": f"random_in_{names['a']}_top{args.k}_like_shared"}
     args.export_dir.mkdir(parents=True, exist_ok=True)
     for bucket, stem in outputs.items():
         per_tensor = {}
         for name in tensor_names:
             layer, group = int(CANONICAL_RE.match(name).group(1)), GROUP_OF_KIND[tensor_kind(name)]
-            if bucket.startswith("random_"):
+            if bucket.startswith("energy_"):
+                per_tensor[name] = energy_controls[(layer, group)][bucket.removeprefix("energy_")]
+            elif bucket.startswith("random_"):
                 per_tensor[name] = random_bases[(layer, group, bucket.removeprefix("random_"))]
             else:
                 per_tensor[name] = buckets[(layer, group)][bucket].float().cpu()
@@ -170,6 +179,10 @@ def main() -> None:
     layers = sorted({int(key.split(".")[1]) for key in handle_a.keys()})
     sim_ks = sorted({k for k in SIM_KS if k <= args.k} | {args.k})
     buckets: dict[tuple[int, str], dict[str, torch.Tensor]] = {}
+    # Energy controls, dimension-matched to each (layer, group)'s shared bucket: A's top-d
+    # eigenvectors ("top"), and a random d-dim subspace inside span(E_a top-k) ("rand_in").
+    energy_controls: dict[tuple[int, str], dict[str, torch.Tensor]] = {}
+    control_generator = torch.Generator().manual_seed(args.seed + 1)
     overlap = defaultdict(list)  # (group, stat) -> per layer
     print(f"##### {name_a} vs {name_b} activation subspaces: top-k overlap and bucket sizes "
           f"(k={args.k}, shared cos^2 >= {args.shared_cos2}, specific cos^2 < {args.specific_cos2}) #####")
@@ -179,6 +192,16 @@ def main() -> None:
             for k in sim_ks:
                 overlap[(group, f"sim_k{k}")].append(subspace_sim(e_a[:, :k], e_b[:, :k]))
             buckets[(layer, group)], cos2 = split_subspaces(e_a, e_b, args.shared_cos2, args.specific_cos2)
+            d_shared = buckets[(layer, group)]["shared"].shape[1]
+            e_a_cpu = e_a.float().cpu()
+            energy_controls[(layer, group)] = {
+                "top": e_a_cpu[:, :d_shared].contiguous(),
+                "rand_in": e_a_cpu @ random_orthonormal(e_a.shape[1], d_shared, control_generator) if d_shared
+                           else e_a_cpu[:, :0],
+            }
+            if d_shared:
+                shared_cpu = buckets[(layer, group)]["shared"].float().cpu()
+                overlap[(group, "sim_shared_top")].append(subspace_sim(shared_cpu, energy_controls[(layer, group)]["top"]))
             overlap[(group, "n")].append(e_a.shape[0])
             overlap[(group, "cos2_1")].append(float(cos2[0]))
             for bucket, basis in buckets[(layer, group)].items():
@@ -190,11 +213,14 @@ def main() -> None:
         print(f"  {'':<8} mean dims: shared {mean('dim_shared'):.1f}  {name_a}-only {mean('dim_a'):.1f}  "
               f"{name_b}-only {mean('dim_b'):.1f}  partial {mean('dim_partial'):.1f}  (of {args.k}; "
               f"largest principal cos^2 {mean('cos2_1'):.3f})")
+        if overlap[(group, "sim_shared_top")]:
+            print(f"  {'':<8} sim(shared, top-d energy of {name_a}) = {mean('sim_shared_top'):.3f}  "
+                  f"(1 = the shared bucket IS {name_a}'s top-energy subspace)")
     print(flush=True)
 
     base_locations = tensor_locations(args.base)
     if args.export_dir is not None:
-        export_buckets(args, buckets, base_locations, groups, {"a": name_a, "b": name_b})
+        export_buckets(args, buckets, base_locations, groups, {"a": name_a, "b": name_b}, energy_controls)
 
     # 2. Where each delta (and W) puts its input-side energy and its top directions.
     ckpt_locations = {name: tensor_locations(path) for name, path in checkpoints.items()}
