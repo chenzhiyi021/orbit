@@ -18,6 +18,12 @@ enable_thinking=False) and scores the SAME text under every --model. Because the
 A reflection-specific edit lowers refl and prop much more than other; a generic edit (e.g. uniform
 delta scaling at a similar overall change) moves both alike.
 
+--add-bias NAME=SRC@SCALE adds, through forward hooks on model NAME's q/k/v/o/gate/up/down layers,
+SCALE times the implicit bias b = (e1^T mu) * (W_SRC - W_base) e1 of fine-tune SRC (implicit_bias.py;
+needs --bias-base and --bias-eig, a --save-eig file with means). E.g. topE_k1 + rl300's bias (@1)
+should recover rl300; base + rl300's bias tests whether the bias alone induces reflection; rl300 @-1
+removes it at inference, @+1 doubles it.
+
     python reflection_token_logprob.py \\
         --completions /mnt/.../eval_results/task_split_ablation/rl300_full/math/math500/completions.jsonl \\
         --model rl300_full=/mnt/.../iter_0000299_hf --model rl300_topE_k1=/mnt/.../rl300_topE_rmright_k1_bf16 \\
@@ -112,6 +118,16 @@ def score(model, ids: list[int], start: int, propensity_ids: torch.Tensor, chunk
     return torch.cat(logps), torch.cat(props)
 
 
+def add_bias_hooks(model, implicit, src: Path, scale: float) -> None:
+    """Forward hooks adding scale * b(src) to every q/k/v/o/gate/up/down output of `model`."""
+    from svd_rank_profile import CANONICAL_RE
+    modules = {f"{n}.weight": m for n, m in model.named_modules() if CANONICAL_RE.match(f"{n}.weight")}
+    biases = implicit.biases_for(src, sorted(modules))
+    for weight_name, module in modules.items():
+        b = (scale * biases[weight_name]).to(module.weight.device, module.weight.dtype)
+        module.register_forward_hook(lambda _m, _inp, out, b=b: out + b)
+
+
 def boot_ci(values: list[float], n: int = 10000) -> tuple[float, float, float]:
     rng = random.Random(0)
     m = statistics.mean(values)
@@ -133,6 +149,10 @@ def main() -> None:
     parser.add_argument("--max-completion-tokens", type=int, default=4096)
     parser.add_argument("--chunk", type=int, default=1024, help="positions per lm_head chunk (memory)")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--add-bias", action="append", default=[], metavar="NAME=SRC@SCALE",
+                        help="add SCALE x fine-tune SRC's implicit bias to model NAME (repeatable)")
+    parser.add_argument("--bias-base", type=Path, default=None, help="base model the implicit biases are relative to")
+    parser.add_argument("--bias-eig", type=Path, default=None, help="--save-eig file with '.mean' entries")
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
@@ -152,10 +172,27 @@ def main() -> None:
           f"{sum(len(e[3]) for e in encoded)} line starts", flush=True)
 
     # per model, per response: (mean logp at markers, mean logp elsewhere, mean propensity at line starts)
+    bias_specs: dict[str, list[tuple[str, float]]] = {}
+    for item in args.add_bias:
+        target, _, rest = item.partition("=")
+        src, _, scale = rest.rpartition("@")
+        if not src or target not in dict(models):
+            raise ValueError(f"--add-bias {item!r}: expected NAME=SRC@SCALE with NAME one of the --model names")
+        bias_specs.setdefault(target, []).append((src, float(scale)))
+    implicit = None
+    if bias_specs:
+        if args.bias_base is None or args.bias_eig is None:
+            raise ValueError("--add-bias needs --bias-base and --bias-eig")
+        from implicit_bias import ImplicitBias
+        implicit = ImplicitBias(args.bias_base, args.bias_eig, args.device)
+
     per_model: dict[str, list[tuple[float, float, float]]] = {}
     started = time.perf_counter()
     for name, path in models:
         model = AutoModelForCausalLM.from_pretrained(path, torch_dtype=torch.bfloat16).to(args.device).eval()
+        for src, scale in bias_specs.get(name, []):
+            add_bias_hooks(model, implicit, Path(src), scale)
+            print(f"  {name}: + {scale:g} x implicit bias of {src}", flush=True)
         pids = torch.tensor(propensity_ids, device=args.device)
         rows = []
         for ids, start, markers, line_starts in encoded:
