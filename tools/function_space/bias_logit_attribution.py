@@ -62,6 +62,9 @@ def main() -> None:
     parser.add_argument("--eig", required=True, type=Path, help="--save-eig file with '.mean' entries")
     parser.add_argument("--model", action="append", required=True, metavar="NAME=PATH")
     parser.add_argument("--top-layers", type=int, default=5, help="layers listed by their reflection push")
+    parser.add_argument("--save-readouts", type=Path, default=None,
+                        help="save each model's whole-vocab z-scored readout of its summed o+down bias "
+                             "(input to line_start_token_correlation.py)")
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
 
@@ -116,6 +119,14 @@ def main() -> None:
         sa, sc = da[ids] - da[ids].mean(), dc[ids] - dc[ids].mean()
         sub = float(sa @ sc / (sa.norm() * sc.norm()))
         print(f"  {a} vs {c}: cos over whole vocab {full:+.3f}   cos over reflection+control tokens {sub:+.3f}")
+    if args.save_readouts is not None:
+        from safetensors.torch import save_file
+
+        args.save_readouts.parent.mkdir(parents=True, exist_ok=True)
+        save_file({m: ((d - d.mean()) / d.std()).float().cpu().contiguous() for m, d in readouts.items()},
+                  str(args.save_readouts), metadata={"base": str(args.base), "eig": str(args.eig),
+                                                     "kind": "z-scored W_U (gamma * summed o+down implicit bias)"})
+        print(f"saved readouts -> {args.save_readouts}")
 
 
 if __name__ == "__main__":
