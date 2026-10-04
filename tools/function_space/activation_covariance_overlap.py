@@ -127,11 +127,14 @@ class CovarianceCollector:
         self.token_mask: torch.Tensor | None = None  # (B, T) bool; None = not collecting (e.g. generate)
         self.handles = []
         for index, layer in enumerate(model.model.layers):
-            targets = {"resid": layer.input_layernorm, "attn_in": layer.self_attn.q_proj,
+            # Pre-norm models (Qwen, Llama) read the residual through input_layernorm; post-norm ones
+            # (OLMo-2/3: norms after each sublayer) have none, and q_proj already reads the raw residual.
+            pre_norm = getattr(layer, "input_layernorm", None)
+            targets = {"resid": pre_norm, "attn_in": layer.self_attn.q_proj,
                        "o_in": layer.self_attn.o_proj, "mlp_in": layer.mlp.gate_proj,
                        "down_in": layer.mlp.down_proj}
             for group, module in targets.items():
-                if group == "resid" or group in groups:
+                if module is not None and (group == "resid" or group in groups):
                     self.handles.append(module.register_forward_pre_hook(self._hook(index, group)))
 
     def _hook(self, layer: int, group: str):
