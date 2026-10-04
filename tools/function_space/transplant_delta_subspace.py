@@ -12,6 +12,15 @@ input-side basis from a --subspace file ("<name>.V", n_in x k, e.g. task_subspac
     scale-norm   W = W_base + c D_body,  c = sqrt(1 - f)       keeps the SAME ||delta|| as deleting
                                                                D_body P would
     alpha<a>     W = W_base + a D_body                         fixed interpolation (WiSE-FT style)
+    inside<b>    W = W_base + D_body (I - P) + b D_body P      rescale only the component inside span(B):
+                                                               b=0 deletes it (= remove_delta_subspace),
+                                                               b=1 is the fine-tune, b>1 amplifies, b<0
+                                                               reverses. With B = the top-1 activation
+                                                               eigenvector (--k 1 of an
+                                                               export_activation_eig_subspace.py file),
+                                                               D P x ~ (e1^T mu) D e1 is the implicit bias,
+                                                               so inside<b> bakes "add (b-1) x bias" into
+                                                               the weights (servable by SGLang)
 
 with D = W_finetuned - W_base and f = ||D_body P||^2 / ||D_body||^2 per tensor. The scale variants
 are the energy-matched controls for "deleting the component helps": they remove as much as the
@@ -56,8 +65,9 @@ def kind_of(name: str) -> str:
 def parse_variants(spec: str) -> list[str]:
     variants = [v.strip() for v in spec.split(",") if v.strip()]
     for v in variants:
-        if v not in FIXED_VARIANTS and not (v.startswith("alpha") and _is_float(v[5:])):
-            raise ValueError(f"unknown variant {v!r}: use {FIXED_VARIANTS} or alpha<float>, e.g. alpha0.5")
+        if v not in FIXED_VARIANTS and not (v.startswith("alpha") and _is_float(v[5:]))                 and not (v.startswith("inside") and _is_float(v[6:])):
+            raise ValueError(f"unknown variant {v!r}: use {FIXED_VARIANTS}, alpha<float> (e.g. alpha0.5) "
+                             f"or inside<float> (e.g. inside1.5)")
     return list(dict.fromkeys(variants))
 
 
@@ -78,6 +88,8 @@ def build(variant: str, d_body: torch.Tensor, d_donor: torch.Tensor | None, basi
         return (1.0 - math.sqrt(f)) * d_body
     if variant == "scale-norm":
         return math.sqrt(max(0.0, 1.0 - f)) * d_body
+    if variant.startswith("inside"):
+        return d_body + (float(variant[6:]) - 1.0) * inside_body
     return float(variant[5:]) * d_body  # alpha<a>
 
 
