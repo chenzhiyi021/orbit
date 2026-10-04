@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 import statistics
 import time
@@ -47,6 +48,7 @@ from pathlib import Path
 import torch
 
 from subspace_overlap_profile import (
+    GROUP_OF_KIND,
     SVD_DTYPES,
     all_target_tensors,
     format_sim_line,
@@ -63,8 +65,6 @@ DEFAULT_INPUT_KEY = "messages"
 
 ACT_COV_NAME = "act_cov"
 BASE_W_NAME = "W_base"
-GROUP_OF_KIND = {"q_proj": "attn_in", "k_proj": "attn_in", "v_proj": "attn_in", "o_proj": "o_in",
-                 "gate_proj": "mlp_in", "up_proj": "mlp_in", "down_proj": "down_in"}
 ALL_GROUPS = ("attn_in", "o_in", "mlp_in", "down_in")
 # Groups whose coordinates are residual-stream (hidden_size) coordinates, for the coordinate report.
 RESIDUAL_GROUPS = ("resid", "attn_in", "mlp_in")
@@ -122,6 +122,7 @@ class CovarianceCollector:
     def __init__(self, model, groups: tuple[str, ...], dtype: torch.dtype, device: torch.device):
         self.groups, self.dtype, self.device = groups, dtype, device
         self.sums: dict[tuple[int, str], torch.Tensor] = {}
+        self.sums_x: dict[tuple[int, str], torch.Tensor] = {}  # sum x, for the activation mean
         self.counts: Counter = Counter()
         self.token_mask: torch.Tensor | None = None  # (B, T) bool; None = not collecting (e.g. generate)
         self.handles = []
@@ -144,6 +145,8 @@ class CovarianceCollector:
             else:
                 update = x.transpose(0, 1) @ x
             self.sums[key] = self.sums[key] + update if key in self.sums else update
+            total = x.sum(0)
+            self.sums_x[key] = self.sums_x[key] + total if key in self.sums_x else total
             self.counts[key] += x.shape[0]
         return hook
 
@@ -154,6 +157,10 @@ class CovarianceCollector:
     def second_moments(self) -> dict[tuple[int, str], torch.Tensor]:
         """Uncentered second moment E[x x^T] (what grad_W = E[delta x^T] spans), not covariance."""
         return {key: total / self.counts[key] for key, total in self.sums.items()}
+
+    def means(self) -> dict[tuple[int, str], torch.Tensor]:
+        """Activation mean E[x] per layer and group."""
+        return {key: total / self.counts[key] for key, total in self.sums_x.items()}
 
 
 def eos_ids(tokenizer, model) -> list[int]:
@@ -231,6 +238,36 @@ def print_spectrum_summary(eigvals: dict[tuple[int, str], torch.Tensor], k_value
     print(flush=True)
 
 
+def mean_direction_report(eigvals: dict[tuple[int, str], torch.Tensor], eigvecs: dict[tuple[int, str], torch.Tensor],
+                          means: dict[tuple[int, str], torch.Tensor], top: int) -> None:
+    """Is the top eigenvector of the uncentered second moment A = E[x x^T] the activation MEAN, and is the
+    input's projection on it nearly constant (so delta along it acts like a bias)? With mu = E[x] and
+    eigenpair (lambda_k, e_k): m_k = e_k^T mu, Var(e_k^T x) = lambda_k - m_k^2, and
+        cos      |cos(e_k, mu)|                         1 = e_k is the mean direction
+        meanFrac m_k^2 / lambda_k                         share of e_k's energy that is the constant mean part
+        CV       sqrt(Var) / |m_k|                        relative spread of the projection; << 1 = ~constant
+    plus ||mu||^2 / tr(A), the share of all input energy that is the mean."""
+    print("##### mean-direction report: is e_k the activation mean, and is e_k^T x ~ constant (bias-like)? #####")
+    print("  per group: median over layers [min, max]")
+    stat = lambda v: f"{statistics.median(v):7.3f} [{min(v):6.3f},{max(v):7.3f}]"  # noqa: E731
+    for group in ALL_GROUPS:
+        keys = sorted(key for key in eigvals if key[1] == group and key in means)
+        if not keys:
+            continue
+        mean_share = [float(means[k].double().pow(2).sum() / eigvals[k].double().sum()) for k in keys]
+        print(f"  ===== {group}  ||mu||^2 / tr(A): {stat(mean_share)}")
+        for r in range(min(top, eigvecs[keys[0]].shape[1])):
+            cos, frac, cv = [], [], []
+            for k in keys:
+                e, mu, lam = eigvecs[k][:, r].double(), means[k].double().to(eigvecs[k].device), float(eigvals[k][r])
+                m = float(e @ mu)
+                cos.append(abs(m) / (float(mu.norm()) + 1e-30))
+                frac.append(m * m / max(lam, 1e-30))
+                cv.append(math.sqrt(max(lam - m * m, 0.0)) / max(abs(m), 1e-30))
+            print(f"    e_{r + 1}:  cos {stat(cos)}   meanFrac {stat(frac)}   CV {stat(cv)}")
+    print(flush=True)
+
+
 def coordinate_report(moments: dict[tuple[int, str], torch.Tensor], probe: list[int], top_n: int = 10) -> None:
     """Rank coordinates by mean square per layer, for the raw residual and the post-norm residual inputs."""
     print("##### residual-stream coordinates by activation mean square #####")
@@ -286,6 +323,8 @@ def main() -> None:
     parser.add_argument("--probe-coords", default="978,505,1536,1720,542,1999,1793",
                          help="residual coordinates to rank (default: subspace_overlap_profile --localization "
                               "top hits for rl300/opd300 deltas and W_base o/down)")
+    parser.add_argument("--mean-report-k", type=int, default=4,
+                         help="eigenvectors e_1..e_k covered by the mean-direction report")
     parser.add_argument("--save-eig", type=Path, default=None,
                          help="save each group's eigenvalues and top-max(k) eigenvectors to this .safetensors")
     parser.add_argument("--device", default="cuda")
@@ -326,6 +365,7 @@ def main() -> None:
     collect(args, model, tokenizer, prompts, collector)
     collector.remove()
     moments = collector.second_moments()
+    means = collector.means()
     del model, collector
     if device.type == "cuda":
         torch.cuda.empty_cache()
@@ -341,6 +381,7 @@ def main() -> None:
         eigvals[key] = values.flip(0)
         eigvecs[key] = vectors.flip(1)[:, :max_k].contiguous()
     print_spectrum_summary(eigvals, k_values)
+    mean_direction_report(eigvals, eigvecs, means, args.mean_report_k)
     coordinate_report(moments, probe)
     if args.save_eig is not None:
         from safetensors.torch import save_file
@@ -349,6 +390,8 @@ def main() -> None:
         for (layer, group), values in eigvals.items():
             tensors[f"layers.{layer}.{group}.eigvals"] = values.float().cpu()
             tensors[f"layers.{layer}.{group}.eigvecs"] = eigvecs[(layer, group)].float().cpu()
+        for (layer, group), mean in means.items():
+            tensors[f"layers.{layer}.{group}.mean"] = mean.float().cpu()
         save_file(tensors, str(args.save_eig))
         print(f"saved eigendecompositions -> {args.save_eig}\n", flush=True)
 
