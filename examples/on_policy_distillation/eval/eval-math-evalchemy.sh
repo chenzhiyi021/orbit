@@ -34,7 +34,11 @@
 # Common overrides (defaults shown):
 #   OUTPUT_DIR=${EVAL_RESULTS_ROOT}/<run>/<iter>/math   (single-checkpoint mode only)
 #   EVAL_RESULTS_ROOT=${ORBIT_ROOT}/eval_results
-#   DATA_NAMES=math500,aime24,amc23     from {aime24,aime25,amc23,math500}
+#   DATA_NAMES=math500,aime24,amc23     from {aime24,aime25,amc23,math500,gpqa_diamond,lcbv5}
+#   GPQA_PATH=Idavidrein/gpqa           HF repo id or local snapshot (gated: needs HF_TOKEN
+#                                       when not local)
+#   LCB_PATH=mlfoundations-dev/LCBv5-v2 HF repo id or local snapshot
+#   GRADE_WORKERS=32                    LiveCodeBench solutions executed concurrently
 #   N_SAMPLING=0                        0 = the paper repetition count per task
 #   TEMPERATURE=0.7  TOP_P=0.95         Evalchemy's distributed-vLLM sampling
 #   SEED=0                              Evalchemy's scheme: repetition n of every
@@ -54,6 +58,7 @@
 #   NUM_GPUS=4                          total GPUs for the eval server
 #   EVAL_TP_SIZE=2                      tensor-parallel size; replicas = NUM_GPUS/TP
 #   GPU_MEMORY_UTILIZATION=0.85
+#   SERVE_DTYPE=bfloat16                float32 for fp32 checkpoints (e.g. remove_delta_subspace.py --dtype fp32)
 #   NUM_SAMPLES=0                       0 = all examples; >0 truncates (smoke runs)
 #   MAX_CHECKPOINTS=6                   cap on checkpoints per sweep; 0 = no cap
 #   CHECKPOINT_SELECT=first             which ones when capped: first | last | spread
@@ -121,6 +126,7 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-40960}"
 NUM_GPUS="${NUM_GPUS:-2}"
 EVAL_TP_SIZE="${EVAL_TP_SIZE:-1}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.85}"
+SERVE_DTYPE="${SERVE_DTYPE:-bfloat16}"
 
 if [ $((NUM_GPUS % EVAL_TP_SIZE)) -ne 0 ]; then
     echo "[eval-math-evalchemy] ERROR: NUM_GPUS (${NUM_GPUS}) must be divisible by EVAL_TP_SIZE (${EVAL_TP_SIZE})" >&2
@@ -183,7 +189,7 @@ start_server() {
         --host 127.0.0.1
         --port "${PORT}"
         --served-model-name "${SERVED_MODEL}"
-        --dtype bfloat16
+        --dtype "${SERVE_DTYPE}"
         --context-length "${MAX_MODEL_LEN}"
         --tp-size "${EVAL_TP_SIZE}"
         --mem-fraction-static "${GPU_MEMORY_UTILIZATION}"
@@ -336,6 +342,9 @@ run_eval() {
         --max-tokens "${MAX_TOKENS_PER_CALL}"
         --grader "${GRADER}"
         --concurrency "${CONCURRENCY}"
+        --gpqa-path "${GPQA_PATH:-Idavidrein/gpqa}"
+        --lcb-path "${LCB_PATH:-mlfoundations-dev/LCBv5-v2}"
+        --grade-workers "${GRADE_WORKERS:-32}"
     )
     if [ "${ENABLE_THINKING}" = "1" ]; then
         runner_args+=( --enable-thinking )

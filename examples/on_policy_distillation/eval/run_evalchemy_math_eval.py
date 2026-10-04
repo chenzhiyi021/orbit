@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""Score a served checkpoint on Evalchemy's public math benchmarks.
+"""Score a served checkpoint on Evalchemy's public math, code and science benchmarks.
 
 This drives an already-running OpenAI-compatible endpoint (sglang; see
-`eval-math-evalchemy.sh`) and reads the benchmark rows straight out of an
-Evalchemy checkout, so the prompt text and the answer grader are the ones
-Evalchemy itself would use. One JSONL row is appended per completion, so an
-interrupted run resumes where it stopped.
+`eval-math-evalchemy.sh`) and mirrors an Evalchemy checkout's prompts and
+graders, so the scores are the ones Evalchemy itself would produce:
+  - aime24/aime25/amc23/math500: rows read from the checkout's data files.
+  - gpqa_diamond: Idavidrein/gpqa (gated on HF), options shuffled and the letter
+    extracted exactly as eval/chat_benchmarks/GPQADiamond does.
+  - lcbv5: mlfoundations-dev/LCBv5-v2; the last fenced code block is executed
+    against the private tests by Evalchemy's own `lcb_run` (Linux only: it forks
+    a sandboxed child per solution).
+One JSONL row is appended per completion, so an interrupted run resumes where it
+stopped.
 
 Writes `<output-dir>/<dataset>/metrics.json` in the shape
 `tools/summarize_eval_results.py` already reads (`acc`, `pass_acc`, `pass@k`),
@@ -16,11 +22,17 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib.util
 import json
 import math
+import random
+import re
 import sys
-from dataclasses import dataclass
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 import aiohttp
 
@@ -31,16 +43,45 @@ Mark your solution with \\boxed
 Answer:"""
 
 # Data file + (problem, answer) column names per task, relative to --evalchemy-root.
-TASKS = {
+MATH_TASKS = {
     "aime24": ("eval/chat_benchmarks/AIME24/data/aime24.json", "problem", "expected_answer"),
     "aime25": ("eval/chat_benchmarks/AIME25/data/aime25.json", "problem", "answer"),
     "amc23": ("eval/chat_benchmarks/AMC23/data/amc23.json", "question", "answer"),
     "math500": ("eval/chat_benchmarks/MATH500/data/math500.jsonl", "problem", "answer"),
 }
+TASKS = (*MATH_TASKS, "gpqa_diamond", "lcbv5")
 
-# Repetition counts the OPD paper reports for each cell; used when --n-sampling
-# is left unset so the defaults reproduce the published protocol.
-PAPER_REPETITIONS = {"aime24": 16, "aime25": 16, "amc23": 10, "math500": 10}
+# eval/chat_benchmarks/GPQADiamond/eval_instruct.py, verbatim.
+GPQA_PROMPT = """Return your final response within \\boxed{{}} and only include the letter choice (A, B, C, or D) as your final response.
+Problem: {problem}
+Options: {options}
+Answer:"""
+
+# eval/chat_benchmarks/LiveCodeBenchv5/eval_instruct.py, verbatim: the instruction
+# is glued straight onto the question text, and the last fenced block is graded.
+LCB_STDIN_INSTRUCTION = "Generate an executable Python function generated from the given prompt. The function should take stdin as input and print the output. Simply call the function after the definition."
+LCB_FUNCTIONAL_INSTRUCTION = "Generate an executable Python function generated from the given prompt. Return the function body without invoking it at the final solution."
+LCB_CODE_BLOCK = re.compile(r"```(?:[a-zA-Z]*)\n(.*?)```", re.DOTALL)
+LCB_TEST_TIMEOUT = 6
+
+# Repetition counts the OPD paper reports for each cell (its Table 12); used when
+# --n-sampling is left unset so the defaults reproduce the published protocol.
+# Evalchemy's own GPQADiamond default is 3, not 10.
+PAPER_REPETITIONS = {"aime24": 16, "aime25": 16, "amc23": 10, "math500": 10, "gpqa_diamond": 10, "lcbv5": 3}
+
+
+@dataclass(frozen=True)
+class Example:
+    example_id: str
+    prompt: str
+    answer: str = ""
+    # Reported as acc_by_group in metrics.json (LiveCodeBench difficulty).
+    group: str = ""
+    meta: dict = field(default_factory=dict)
+
+
+# (example, one output per repetition, None for a failed request) -> verdict per repetition.
+GradeFn = Callable[[Example, list[str | None]], list[bool]]
 
 
 @dataclass(frozen=True)
@@ -48,7 +89,6 @@ class WorkItem:
     task: str
     example_id: str
     prompt: str
-    answer: str
     repetition: int
 
     @property
@@ -74,17 +114,131 @@ def seed_for(base_seed: int, repetition: int) -> int:
     return base_seed + repetition
 
 
-def load_examples(task: str, evalchemy_root: Path) -> list[tuple[str, str, str]]:
-    relative_path, problem_key, answer_key = TASKS[task]
+def load_math_examples(task: str, evalchemy_root: Path) -> list[Example]:
+    relative_path, problem_key, answer_key = MATH_TASKS[task]
     path = evalchemy_root / relative_path
     if not path.is_file():
         raise FileNotFoundError(f"Missing Evalchemy data file: {path}")
     with path.open(encoding="utf-8") as handle:
         rows = [json.loads(line) for line in handle if line.strip()]
     return [
-        (str(row.get("id", row.get("unique_id", index))), str(row[problem_key]), str(row[answer_key]))
+        Example(
+            str(row.get("id", row.get("unique_id", index))),
+            MATH_PROMPT.format(problem=row[problem_key]),
+            str(row[answer_key]),
+        )
         for index, row in enumerate(rows)
     ]
+
+
+def load_evalchemy_module(evalchemy_root: Path, relative_path: str, name: str):
+    """Import one Evalchemy helper file by path.
+
+    Going through the `eval.chat_benchmarks` package would run its
+    eval_instruct.py, which imports lm_eval; the helpers themselves only need
+    the stdlib (and scipy for LiveCodeBench).
+    """
+    path = evalchemy_root / "eval/chat_benchmarks" / relative_path
+    if not path.is_file():
+        raise FileNotFoundError(f"Missing Evalchemy file: {path}")
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def prepare_gpqa(args: argparse.Namespace) -> tuple[list[Example], GradeFn, int]:
+    from datasets import load_dataset
+
+    utils = load_evalchemy_module(args.evalchemy_root, "GPQADiamond/testing_utils.py", "evalchemy_gpqa_utils")
+    examples = []
+    for index, row in enumerate(load_dataset(args.gpqa_path, "gpqa_diamond")["train"]):
+        answers = [
+            row["Correct Answer"],
+            row["Incorrect Answer 1"],
+            row["Incorrect Answer 2"],
+            row["Incorrect Answer 3"],
+        ]
+        # Evalchemy reseeds per question, so every question gets the same permutation.
+        random.Random(42).shuffle(answers)
+        letters = "ABCD"
+        options = ", ".join(f"{letter}) {answer}" for letter, answer in zip(letters, answers))
+        examples.append(
+            Example(
+                str(row.get("Record ID") or index),
+                GPQA_PROMPT.format(problem=row["Question"], options=options),
+                letters[answers.index(row["Correct Answer"])],
+            )
+        )
+
+    def grade(example: Example, outputs: list[str | None]) -> list[bool]:
+        return [output is not None and utils.get_multiple_choice_answer(output) == example.answer for output in outputs]
+
+    return examples, grade, 1
+
+
+def prepare_lcb(args: argparse.Namespace) -> tuple[list[Example], GradeFn, int]:
+    from datasets import load_dataset
+
+    utils = load_evalchemy_module(
+        args.evalchemy_root, "LiveCodeBenchv5/livecodebench_utils.py", "evalchemy_lcb_utils"
+    )
+    dataset = load_dataset(args.lcb_path, split="test")
+    # The private tests are ~2.3GB of compressed blobs; leave them in the Arrow
+    # table and decode one problem at a time while grading.
+    light = dataset.remove_columns(["private_test_cases"])
+    examples = []
+    for index, row in enumerate(light):
+        is_stdin = utils.has_test_type(row["public_test_cases"], "stdin")
+        instruction = LCB_STDIN_INSTRUCTION if is_stdin else LCB_FUNCTIONAL_INSTRUCTION
+        examples.append(
+            Example(
+                str(row["question_id"]),
+                instruction + row["question_content"],
+                group=str(row["difficulty"]),
+                meta={"row": index, "is_stdin": is_stdin},
+            )
+        )
+    dataset_lock = threading.Lock()
+
+    def grade(example: Example, outputs: list[str | None]) -> list[bool]:
+        with dataset_lock:
+            encoded = dataset[example.meta["row"]]["private_test_cases"]
+        problem = {"test": utils.translate_private_test_cases(encoded)}
+        verdicts = []
+        for output in outputs:
+            blocks = LCB_CODE_BLOCK.findall(output) if output is not None else []
+            if not blocks:
+                verdicts.append(False)
+                continue
+            try:
+                results = utils.lcb_run(
+                    problem,
+                    utils.post_process_code(blocks[-1]),
+                    LCB_TEST_TIMEOUT,
+                    not example.meta["is_stdin"],
+                )
+                verdicts.append(bool(results) and all(result[0] for result in results))
+            except Exception:  # noqa: BLE001 - Evalchemy scores evaluation errors as wrong
+                verdicts.append(False)
+        return verdicts
+
+    return examples, grade, args.grade_workers
+
+
+def prepare_task(task: str, args: argparse.Namespace) -> tuple[list[Example], GradeFn, int]:
+    """Return the task's examples, its per-example grader, and how many examples to grade at once."""
+    if task == "gpqa_diamond":
+        return prepare_gpqa(args)
+    if task == "lcbv5":
+        return prepare_lcb(args)
+    grade_one = make_grader(args.grader)
+
+    def grade(example: Example, outputs: list[str | None]) -> list[bool]:
+        return [output is not None and grade_one(output, example.answer) for output in outputs]
+
+    # Serial: Orbit's math grader may rely on signal-based timeouts (main thread only).
+    return load_math_examples(task, args.evalchemy_root), grade, 1
 
 
 def make_grader(grader: str):
@@ -160,10 +314,15 @@ def pass_at_k(num_samples: int, num_correct: int, k: int) -> float:
     return 1.0 - math.prod((num_samples - num_correct - i) / (num_samples - i) for i in range(k))
 
 
-def write_metrics(task_dir: Path, results: dict[str, list[bool]], pass_k_values: list[int]) -> dict:
+def write_metrics(
+    task_dir: Path, results: dict[str, list[bool]], pass_k_values: list[int], groups: dict[str, str]
+) -> dict:
     per_example = list(results.values())
     total = sum(len(flags) for flags in per_example)
     correct = sum(sum(flags) for flags in per_example)
+    by_group: dict[str, list[bool]] = {}
+    for example_id, group in groups.items():
+        by_group.setdefault(group, []).extend(results[example_id])
     metrics = {
         "acc": correct / total if total else 0.0,
         "pass_acc": sum(any(flags) for flags in per_example) / len(per_example) if per_example else 0.0,
@@ -175,23 +334,25 @@ def write_metrics(task_dir: Path, results: dict[str, list[bool]], pass_k_values:
         "num_examples": len(per_example),
         "num_samples": total,
     }
+    if by_group:
+        metrics["acc_by_group"] = {group: sum(flags) / len(flags) for group, flags in sorted(by_group.items())}
     task_dir.mkdir(parents=True, exist_ok=True)
     (task_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     return metrics
 
 
-async def run_task(args: argparse.Namespace, task: str, grade) -> dict:
+async def run_task(args: argparse.Namespace, task: str) -> dict:
     task_dir = args.output_dir / task
     task_dir.mkdir(parents=True, exist_ok=True)
     completions_path = task_dir / "completions.jsonl"
 
-    examples = load_examples(task, args.evalchemy_root)
+    examples, grade, grade_workers = prepare_task(task, args)
     if args.limit > 0:
         examples = examples[: args.limit]
     repetitions = args.n_sampling if args.n_sampling > 0 else PAPER_REPETITIONS[task]
     work = [
-        WorkItem(task, example_id, MATH_PROMPT.format(problem=problem), answer, repetition)
-        for example_id, problem, answer in examples
+        WorkItem(task, example.example_id, example.prompt, repetition)
+        for example in examples
         for repetition in range(repetitions)
     ]
 
@@ -228,20 +389,28 @@ async def run_task(args: argparse.Namespace, task: str, grade) -> dict:
 
             await asyncio.gather(*(bounded(item) for item in pending))
 
-    results: dict[str, list[bool]] = {}
-    for item in work:
-        row = rows.get(item.key, {})
-        results.setdefault(item.example_id, []).append(
-            row.get("status") == "ok" and grade(row["output"], item.answer)
-        )
-    metrics = write_metrics(task_dir, results, args.pass_k_values)
+    def grade_example(example: Example) -> list[bool]:
+        outputs = []
+        for repetition in range(repetitions):
+            row = rows.get(WorkItem(task, example.example_id, example.prompt, repetition).key, {})
+            outputs.append(row["output"] if row.get("status") == "ok" else None)
+        return grade(example, outputs)
+
+    if grade_workers > 1:
+        print(f"[{task}] grading {len(examples)} examples with {grade_workers} workers", flush=True)
+        with ThreadPoolExecutor(max_workers=grade_workers) as pool:
+            verdicts = list(pool.map(grade_example, examples))
+    else:
+        verdicts = [grade_example(example) for example in examples]
+    results = {example.example_id: flags for example, flags in zip(examples, verdicts)}
+    groups = {example.example_id: example.group for example in examples if example.group}
+    metrics = write_metrics(task_dir, results, args.pass_k_values, groups)
     print(f"[{task}] acc={metrics['acc']:.4f} pass_acc={metrics['pass_acc']:.4f}", flush=True)
     return metrics
 
 
 async def main_async(args: argparse.Namespace) -> None:
-    grade = make_grader(args.grader)
-    summary = {task: await run_task(args, task, grade) for task in args.tasks}
+    summary = {task: await run_task(args, task) for task in args.tasks}
     (args.output_dir / "summary.json").write_text(
         json.dumps({"model": args.model, "grader": args.grader, "tasks": summary}, indent=2), encoding="utf-8"
     )
@@ -278,7 +447,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--max-tokens", type=int, default=32768)
     parser.add_argument("--enable-thinking", action="store_true")
-    parser.add_argument("--grader", choices=["evalchemy", "orbit"], default="evalchemy")
+    parser.add_argument(
+        "--grader", choices=["evalchemy", "orbit"], default="evalchemy", help="math tasks only"
+    )
+    parser.add_argument(
+        "--gpqa-path", default="Idavidrein/gpqa", help="HF repo id or local snapshot (needs its README.md)"
+    )
+    parser.add_argument("--lcb-path", default="mlfoundations-dev/LCBv5-v2", help="HF repo id or local snapshot")
+    parser.add_argument(
+        "--grade-workers", type=int, default=32, help="LiveCodeBench problems executed concurrently"
+    )
     parser.add_argument("--concurrency", type=int, default=64)
     parser.add_argument("--timeout-seconds", type=float, default=1800.0)
     parser.add_argument("--max-attempts", type=int, default=5)
