@@ -42,6 +42,16 @@ MATH_PROMPT = """Problem: {problem}
 Mark your solution with \\boxed
 Answer:"""
 
+# SimpleRL-Zoo's "simple prompt" (Zeng et al. 2025, Fig. 10), used to zero-RL-train base models with weak
+# instruction following (Llama-3.1-8B, Mistral-7B, Qwen-2.5-0.5B/1.5B). Sent as a raw completion, no chat
+# template; generation stops before the model starts inventing the next "Question:".
+SIMPLERL_PROMPT = """Question:
+{problem}
+Answer:
+Let's think step by step.
+"""
+SIMPLERL_STOP = ["\nQuestion:", "\n\nQuestion"]
+
 # Data file + (problem, answer) column names per task, relative to --evalchemy-root.
 MATH_TASKS = {
     "aime24": ("eval/chat_benchmarks/AIME24/data/aime24.json", "problem", "expected_answer"),
@@ -114,8 +124,9 @@ def seed_for(base_seed: int, repetition: int) -> int:
     return base_seed + repetition
 
 
-def load_math_examples(task: str, evalchemy_root: Path) -> list[Example]:
+def load_math_examples(task: str, evalchemy_root: Path, prompt_style: str = "evalchemy") -> list[Example]:
     relative_path, problem_key, answer_key = MATH_TASKS[task]
+    template = SIMPLERL_PROMPT if prompt_style == "simplerl" else MATH_PROMPT
     path = evalchemy_root / relative_path
     if not path.is_file():
         raise FileNotFoundError(f"Missing Evalchemy data file: {path}")
@@ -124,7 +135,7 @@ def load_math_examples(task: str, evalchemy_root: Path) -> list[Example]:
     return [
         Example(
             str(row.get("id", row.get("unique_id", index))),
-            MATH_PROMPT.format(problem=row[problem_key]),
+            template.format(problem=row[problem_key]),
             str(row[answer_key]),
         )
         for index, row in enumerate(rows)
@@ -238,7 +249,7 @@ def prepare_task(task: str, args: argparse.Namespace) -> tuple[list[Example], Gr
         return [output is not None and grade_one(output, example.answer) for output in outputs]
 
     # Serial: Orbit's math grader may rely on signal-based timeouts (main thread only).
-    return load_math_examples(task, args.evalchemy_root), grade, 1
+    return load_math_examples(task, args.evalchemy_root, args.prompt_style), grade, 1
 
 
 def make_grader(grader: str):
@@ -249,23 +260,35 @@ def make_grader(grader: str):
     `orbit` is the grader Orbit trains against (`--rm-type math`); it accepts
     strictly more answers, so the two are not interchangeable -- pick one and
     keep it fixed across the checkpoints you compare.
+    `simplerl` is `evalchemy` with a fallback for models that were never asked to
+    box (SimpleRL-Zoo's simple prompt): the last \\boxed{} if any, else the text
+    after the last "answer is", else the last number.
     """
-    if grader == "evalchemy":
+    if grader in ("evalchemy", "simplerl"):
         from lm_eval.tasks.hendrycks_math.utils import is_equiv, last_boxed_only_string, remove_boxed
 
-        def grade(prediction: str, reference: str) -> bool:
+        def extract(prediction: str) -> str:
             boxed = last_boxed_only_string(prediction)
             try:
-                extracted = remove_boxed(boxed) if boxed else ""
+                return remove_boxed(boxed) if boxed else ""
             except AssertionError:
                 # last_boxed_only_string also returns \fbox{...} and \boxed
                 # followed by whitespace/newline before the brace; remove_boxed
                 # only accepts \boxed{...} / "\boxed " and asserts otherwise.
                 # Score those as wrong instead of aborting the whole run.
-                extracted = ""
-            return bool(is_equiv(reference, extracted))
+                return ""
 
-        return grade
+        def extract_lenient(prediction: str) -> str:
+            if last_boxed_only_string(prediction):
+                return extract(prediction)
+            stated = re.findall(r"answer is[:\s]*\$?([^\n$]+?)\$?\s*(?:\.\s*)?(?:\n|$)", prediction, re.IGNORECASE)
+            if stated:
+                return stated[-1].strip()
+            numbers = re.findall(r"-?\d+(?:\.\d+)?(?:/\d+)?", prediction.replace(",", ""))
+            return numbers[-1] if numbers else ""
+
+        pick = extract_lenient if grader == "simplerl" else extract
+        return lambda prediction, reference: bool(is_equiv(reference, pick(prediction)))
 
     from orbit.rollout.rm_hub.math_utils import grade_answer_verl
 
@@ -277,28 +300,37 @@ async def generate_one(
     args: argparse.Namespace,
     item: WorkItem,
 ) -> dict:
+    raw = args.prompt_style == "simplerl"
     payload = {
         "model": args.model,
-        "messages": [{"role": "user", "content": item.prompt}],
         "max_tokens": args.max_tokens,
         "temperature": args.temperature,
         "top_p": args.top_p,
-        # Qwen3 chat templates gate the <think> block on this; sglang forwards it
-        # to the tokenizer's chat template.
-        "chat_template_kwargs": {"enable_thinking": args.enable_thinking},
     }
+    if raw:
+        # Base / zero-RL models: a plain completion, no chat template.
+        payload.update(prompt=item.prompt, stop=SIMPLERL_STOP)
+    else:
+        payload.update(
+            messages=[{"role": "user", "content": item.prompt}],
+            # Qwen3 chat templates gate the <think> block on this; sglang forwards it
+            # to the tokenizer's chat template.
+            chat_template_kwargs={"enable_thinking": args.enable_thinking},
+        )
     if args.seed >= 0:
         payload["seed"] = seed_for(args.seed, item.repetition)
+    endpoint = "/v1/completions" if raw else "/v1/chat/completions"
     last_error = ""
     for attempt in range(args.max_attempts):
         try:
             async with session.post(
-                f"{args.base_url.rstrip('/')}/v1/chat/completions",
+                f"{args.base_url.rstrip('/')}{endpoint}",
                 json=payload,
                 timeout=aiohttp.ClientTimeout(total=args.timeout_seconds),
             ) as response:
                 body = await response.json()
-            return {"key": item.key, "status": "ok", "output": body["choices"][0]["message"]["content"]}
+            choice = body["choices"][0]
+            return {"key": item.key, "status": "ok", "output": choice["text"] if raw else choice["message"]["content"]}
         except Exception as error:  # noqa: BLE001 - retried, then recorded on the row
             last_error = f"{type(error).__name__}: {error}"
             await asyncio.sleep(min(2**attempt, 30))
@@ -448,7 +480,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-tokens", type=int, default=32768)
     parser.add_argument("--enable-thinking", action="store_true")
     parser.add_argument(
-        "--grader", choices=["evalchemy", "orbit"], default="evalchemy", help="math tasks only"
+        "--grader", choices=["evalchemy", "orbit", "simplerl"], default="evalchemy", help="math tasks only"
+    )
+    parser.add_argument(
+        "--prompt-style",
+        choices=["evalchemy", "simplerl"],
+        default="evalchemy",
+        help="math tasks only: 'simplerl' sends SimpleRL-Zoo's raw 'Question/Answer' completion prompt "
+        "(no chat template) for base and zero-RL models",
     )
     parser.add_argument(
         "--gpqa-path", default="Idavidrein/gpqa", help="HF repo id or local snapshot (needs its README.md)"

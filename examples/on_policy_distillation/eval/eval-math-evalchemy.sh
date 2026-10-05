@@ -66,7 +66,10 @@
 #   CHECKPOINT_SELECT=first             which ones when capped: first | last | spread
 #                                       (spread = evenly spaced, both ends included)
 #   ENABLE_THINKING=0
-#   GRADER=evalchemy                    or 'orbit' for Orbit's --rm-type math grader
+#   GRADER=evalchemy                    or 'orbit' for Orbit's --rm-type math grader, or 'simplerl'
+#                                       (\boxed, else "answer is", else last number)
+#   PROMPT_STYLE=evalchemy              or 'simplerl': SimpleRL-Zoo's raw "Question/Answer" completion
+#                                       prompt, no chat template (base / zero-RL models)
 #   CONCURRENCY=64  PORT=18001
 #   KEEP_BAKED=0  BAKE_ROOT  BASE_MODEL
 #   PYTHON_BIN           serving + adapter baking / checkpoint conversion
@@ -139,6 +142,7 @@ EVAL_DP_SIZE=$((NUM_GPUS / EVAL_TP_SIZE))
 NUM_SAMPLES="${NUM_SAMPLES:-0}"
 ENABLE_THINKING="${ENABLE_THINKING:-0}"
 GRADER="${GRADER:-evalchemy}"
+PROMPT_STYLE="${PROMPT_STYLE:-evalchemy}"
 CONCURRENCY="${CONCURRENCY:-64}"
 PORT="${PORT:-18001}"
 KEEP_BAKED="${KEEP_BAKED:-0}"
@@ -347,6 +351,7 @@ run_eval() {
         --seed "${SEED}"
         --max-tokens "${MAX_TOKENS_PER_CALL}"
         --grader "${GRADER}"
+        --prompt-style "${PROMPT_STYLE}"
         --concurrency "${CONCURRENCY}"
         --gpqa-path "${GPQA_PATH:-Idavidrein/gpqa}"
         --lcb-path "${LCB_PATH:-mlfoundations-dev/LCBv5-v2}"

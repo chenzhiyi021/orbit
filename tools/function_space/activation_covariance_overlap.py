@@ -102,8 +102,15 @@ def load_prompts(args, tokenizer) -> list[str]:
     template_kwargs = json.loads(args.chat_template_kwargs)
     prompts = []
     for row in rows:
-        text = tokenizer.apply_chat_template(to_messages(row[args.input_key]), tokenize=False,
-                                             add_generation_prompt=True, **template_kwargs)
+        if args.raw_prompt_template:
+            # Base / zero-RL models (no chat template): format the last user turn into the raw prompt.
+            # Tokenization below uses add_special_tokens=False, so the BOS goes in here.
+            messages = to_messages(row[args.input_key])
+            question = next(m["content"] for m in reversed(messages) if m["role"] == "user")
+            text = (tokenizer.bos_token or "") + args.raw_prompt_template.replace("\\n", "\n").format(prompt=question)
+        else:
+            text = tokenizer.apply_chat_template(to_messages(row[args.input_key]), tokenize=False,
+                                                 add_generation_prompt=True, **template_kwargs)
         if len(tokenizer(text, add_special_tokens=False)["input_ids"]) <= args.max_prompt_tokens:
             prompts.append(text)
         if len(prompts) == args.num_prompts:
@@ -310,6 +317,10 @@ def main() -> None:
     parser.add_argument("--input-key", default=DEFAULT_INPUT_KEY,
                          help="prompt field: a string or a list of chat messages (M9 verifier data uses 'prompt')")
     parser.add_argument("--chat-template-kwargs", default='{"enable_thinking": false}')
+    parser.add_argument("--raw-prompt-template", default=None,
+                         help="skip the chat template and format the user turn into this raw prompt ({prompt}, "
+                              "literal \\n allowed), e.g. SimpleRL-Zoo's "
+                              "'Question:\\n{prompt}\\nAnswer:\\nLet\\'s think step by step.\\n'")
     parser.add_argument("--num-prompts", type=int, default=256)
     parser.add_argument("--max-prompt-tokens", type=int, default=2048)
     parser.add_argument("--gen-tokens", type=int, default=1024,
