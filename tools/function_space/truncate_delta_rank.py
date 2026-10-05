@@ -50,10 +50,15 @@ def copy_side_files(source_dir: Path, base_dir: Path, out_dir: Path) -> None:
     SGLang ignore (silently falling back to rope_theta=10000 instead of 1e6, which wrecks the
     model), and a list-valued "extra_special_tokens" in tokenizer_config.json that fails to load.
     The one exception is the shard index: the output shards reuse the fine-tune's shard file
-    names, so its model.safetensors.index.json (if any) is the one that matches them."""
+    names, so its model.safetensors.index.json (if any) is the one that matches them. Weights in
+    other formats (repos that ship both, e.g. Tulu 3's pytorch_model-*.bin) are skipped: they are the
+    BASE weights, would waste a full model of disk per output, and a loader preferring them would
+    silently serve the base."""
     index_name = "model.safetensors.index.json"
+    weight_suffixes = {".safetensors", ".bin", ".pt", ".pth", ".h5", ".msgpack", ".gguf"}
     for item in base_dir.iterdir():
-        if item.is_file() and item.suffix != ".safetensors" and item.name != index_name:
+        if (item.is_file() and item.suffix not in weight_suffixes and item.name != index_name
+                and not item.name.endswith((".bin.index.json", ".pt.index.json"))):
             shutil.copy2(item, out_dir / item.name)
     if (source_dir / index_name).is_file():
         shutil.copy2(source_dir / index_name, out_dir / index_name)
