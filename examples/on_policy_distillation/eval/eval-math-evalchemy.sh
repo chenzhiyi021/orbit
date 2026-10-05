@@ -52,7 +52,9 @@
 #                                       a fixed SEED still drifts, because a request's
 #                                       logits depend on which other requests share
 #                                       its batch. Costs throughput.
-#   ATTENTION_BACKEND=triton            only used when DETERMINISTIC=1
+#   ATTENTION_BACKEND=triton            used when DETERMINISTIC=1 or SERVE_DTYPE=float32
+#                                       (FlashAttention has no fp32 kernel); set it to
+#                                       force a backend otherwise
 #   MAX_TOKENS_PER_CALL=32768
 #   MAX_MODEL_LEN=40960
 #   NUM_GPUS=4                          total GPUs for the eval server
@@ -116,6 +118,7 @@ TEMPERATURE="${TEMPERATURE:-0.7}"
 TOP_P="${TOP_P:-0.95}"
 SEED="${SEED:-0}"
 DETERMINISTIC="${DETERMINISTIC:-0}"
+ATTENTION_BACKEND_SET="${ATTENTION_BACKEND:+1}"
 ATTENTION_BACKEND="${ATTENTION_BACKEND:-triton}"
 MAX_TOKENS_PER_CALL="${MAX_TOKENS_PER_CALL:-32768}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-40960}"
@@ -202,6 +205,9 @@ start_server() {
             --enable-deterministic-inference
             --attention-backend "${ATTENTION_BACKEND}"
         )
+    elif [ "${SERVE_DTYPE}" = "float32" ] || [ -n "${ATTENTION_BACKEND_SET}" ]; then
+        # The default FlashAttention backend only takes fp16/bf16/fp8.
+        serve_args+=( --attention-backend "${ATTENTION_BACKEND}" )
     fi
     # Only pass --dp-size when it does something: a single replica is the default
     # and the flag is not worth depending on for it.
