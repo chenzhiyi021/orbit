@@ -52,12 +52,11 @@
 #                                       under --use-dynamic-batch-size, and
 #                                       GLOBAL_BATCH_SIZE below is the sample
 #                                       count aggregated into one optimizer
-#                                       step. Default GLOBAL_BATCH_SIZE=32
-#                                       mirrors the yaml's grad_accum count
-#                                       assuming a single data-parallel
-#                                       replica -- multiply by your actual DP
-#                                       world size to reproduce the same
-#                                       *effective* batch size.
+#                                       step. It is already global (split
+#                                       across DP ranks, not multiplied by
+#                                       them). Default 256 = 1 x 32 x 8 GPUs,
+#                                       the source run's true effective batch,
+#                                       and matches the unified OPD launchers.
 #   - max_length: 12288             -> no per-example truncation flag found in
 #                                       this codebase's examples; approximated
 #                                       via --max-tokens-per-gpu (a packing
@@ -119,11 +118,12 @@ source "${ORBIT_ROOT}/orbit_plugins/model_args/qwen3-1.7B.sh"   # provides MODEL
 # === Training schedule ===
 # max_steps: 100 -> NUM_ROLLOUT (exact).
 NUM_ROLLOUT="${NUM_ROLLOUT:-100}"
-ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-32}"
-# per_device_train_batch_size(1) * gradient_accumulation_steps(32); scale by
-# your DP world size to match the source's true effective batch size -- see
-# header note.
-GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-32}"
+# Global batch 256, aligned with the unified M4--M6 OPD launchers
+# (examples/on_policy_distillation/unified_300step_constant/) and with the
+# source TRL run's true effective batch (per_device 1 x grad_accum 32 x 8 GPUs).
+# Orbit's batch args are already global, so this holds for any GPUS_PER_NODE.
+ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-256}"
+GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-256}"
 
 # === ARGS arrays ===
 COLOCATE_ARGS=( --colocate )
@@ -142,7 +142,11 @@ ROLLOUT_ARGS=(
     --prompt-data "${TRAIN_JSONL}"
     --input-key messages
     --rollout-function-path orbit.rollout.sft_rollout.generate_rollout
-    --loss-mask-type "${LOSS_MASK_TYPE:-qwen}"
+    # Same prompt string as the unified OPD launchers' student rollout:
+    # user turn + generation prompt rendered with enable_thinking=false, i.e.
+    # ending in an empty <think></think> block; loss on teacher content + EOS.
+    --loss-mask-type "${LOSS_MASK_TYPE:-generation_prompt}"
+    --apply-chat-template-kwargs '{"enable_thinking": false}'
     --num-rollout "${NUM_ROLLOUT}"
     --rollout-batch-size "${ROLLOUT_BATCH_SIZE}"
     --n-samples-per-prompt 1

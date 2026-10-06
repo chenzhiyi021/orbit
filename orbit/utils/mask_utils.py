@@ -7,10 +7,13 @@ def get_response_lengths(loss_masks: list[list[int]]) -> list[int]:
 
 
 class MultiTurnLossMaskGenerator:
-    def __init__(self, tokenizer: AutoTokenizer, tokenizer_type: str = "qwen"):
+    def __init__(
+        self, tokenizer: AutoTokenizer, tokenizer_type: str = "qwen", chat_template_kwargs: dict | None = None
+    ):
         self.tokenizer = tokenizer
         self.tokenizer_type = tokenizer_type
-        if tokenizer_type == "response_only":
+        self.chat_template_kwargs = chat_template_kwargs or {}
+        if tokenizer_type in ("response_only", "generation_prompt"):
             self.system_message_length = 0
             self.gen_token_length = 0
         else:
@@ -191,6 +194,36 @@ class MultiTurnLossMaskGenerator:
             loss_mask = [0] * len(token_ids)
         return token_ids, loss_mask
 
+    def gen_generation_prompt_loss_mask(
+        self, messages: list[dict], tools: list[dict] = None
+    ) -> tuple[list[int], list[int]]:
+        """Train the final assistant turn exactly as an on-policy rollout would produce it.
+
+        The prompt is ``messages[:-1]`` rendered with ``add_generation_prompt=True`` and
+        ``chat_template_kwargs`` -- the same string the rollout engine samples from (e.g.
+        Qwen3 with ``enable_thinking=False`` ends in an empty ``<think></think>`` block). The
+        response is the assistant content followed by EOS, matching the token sequence a
+        rollout that stopped on EOS returns. Loss covers the response tokens only.
+        """
+        if not messages or messages[-1].get("role") != "assistant":
+            raise ValueError("generation_prompt loss mask requires the final message to be from assistant")
+        if self.tokenizer.eos_token_id is None:
+            raise ValueError("generation_prompt loss mask requires a tokenizer with eos_token_id")
+
+        prompt = self.tokenizer.apply_chat_template(
+            messages[:-1], tokenize=False, add_generation_prompt=True, tools=tools, **self.chat_template_kwargs
+        )
+        prompt_tokens = self.tokenizer(prompt, add_special_tokens=False)["input_ids"]
+        response_tokens = self.tokenizer(messages[-1]["content"], add_special_tokens=False)["input_ids"]
+        response_tokens = response_tokens + [self.tokenizer.eos_token_id]
+
+        token_ids = prompt_tokens + response_tokens
+        loss_mask = [0] * len(prompt_tokens) + [1] * len(response_tokens)
+
+        if messages[-1].get("step_loss_mask", 1) != 1:
+            loss_mask = [0] * len(token_ids)
+        return token_ids, loss_mask
+
     def get_loss_mask(self, messages: list[dict], tools: list[dict] = None) -> tuple[list[int], list[int]]:
         if self.tokenizer_type == "qwen":
             if "<｜Assistant｜>" in self.tokenizer.get_added_vocab():
@@ -203,6 +236,8 @@ class MultiTurnLossMaskGenerator:
             return self.gen_multi_turn_loss_mask_distill_qwen(messages, tools)
         elif self.tokenizer_type == "response_only":
             return self.gen_response_only_loss_mask(messages, tools)
+        elif self.tokenizer_type == "generation_prompt":
+            return self.gen_generation_prompt_loss_mask(messages, tools)
         else:
             raise ValueError(f"Unsupported tokenizer type: {self.tokenizer_type}")
 

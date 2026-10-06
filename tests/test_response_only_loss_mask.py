@@ -2,6 +2,8 @@ from orbit.utils.mask_utils import MultiTurnLossMaskGenerator
 
 
 class FakeChatTokenizer:
+    eos_token_id = 0
+
     def __call__(self, text, add_special_tokens=False):
         return {"input_ids": [ord(ch) for ch in text]}
 
@@ -13,10 +15,13 @@ class FakeChatTokenizer:
         return_dict=False,
         add_generation_prompt=False,
         tools=None,
+        enable_thinking=None,
     ):
         text = "".join(f"<{message['role']}>{message['content']}</{message['role']}>" for message in messages)
         if add_generation_prompt:
             text += "<assistant>"
+            if enable_thinking is False:
+                text += "<think></think>"
         if tokenize:
             return [ord(ch) for ch in text]
         return text
@@ -91,3 +96,22 @@ def test_response_only_loss_mask_uses_llama_fallback_when_chat_template_missing(
     expected_response_ids = tokenizer("A. choice", add_special_tokens=False)["input_ids"]
     assert token_ids == expected_prompt_ids + expected_response_ids
     assert loss_mask == [0] * len(expected_prompt_ids) + [1] * len(expected_response_ids)
+
+
+def test_generation_prompt_loss_mask_matches_rollout_prompt_and_appends_eos():
+    tokenizer = FakeChatTokenizer()
+    generator = MultiTurnLossMaskGenerator(
+        tokenizer, tokenizer_type="generation_prompt", chat_template_kwargs={"enable_thinking": False}
+    )
+    messages = [
+        {"role": "user", "content": "1+1?"},
+        {"role": "assistant", "content": "2"},
+    ]
+
+    token_ids, loss_mask = generator.get_loss_mask(messages)
+
+    expected_prompt_ids = tokenizer("<user>1+1?</user><assistant><think></think>")["input_ids"]
+    expected_response_ids = tokenizer("2")["input_ids"] + [tokenizer.eos_token_id]
+    assert token_ids == expected_prompt_ids + expected_response_ids
+    assert loss_mask == [0] * len(expected_prompt_ids) + [1] * len(expected_response_ids)
+    assert generator.get_response_lengths([loss_mask]) == [len(expected_response_ids)]

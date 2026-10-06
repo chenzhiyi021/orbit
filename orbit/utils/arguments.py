@@ -3023,8 +3023,11 @@ def get_orbit_extra_args_provider(add_custom_arguments=None):
                 "--loss-mask-type",
                 type=str,
                 default="qwen",
-                choices=["qwen", "qwen3", "distill_qwen"],
-                help="Loss mask type",
+                choices=["qwen", "qwen3", "distill_qwen", "response_only", "generation_prompt"],
+                help=(
+                    "Loss mask type. generation_prompt renders the prompt with add_generation_prompt=True and "
+                    "--apply-chat-template-kwargs (same as an on-policy rollout) and trains content + EOS."
+                ),
             )
             parser.add_argument(
                 "--data-pad-size-multiplier",
