@@ -252,6 +252,18 @@ MISC_ARGS=(
     --no-check-for-nan-in-loss-and-grad
 )
 
+# Optional training-time subspace exclusion (orbit/backends/megatron_utils/subspace_exclusion.py),
+# same knobs as run-m6-opd-st-non-thinking-full-exclude-subspace.sh; off unless
+# EXCLUDE_SUBSPACE_PATH is set. Needs TENSOR_MODEL_PARALLEL_SIZE=1 (the default here).
+if [[ -n "${EXCLUDE_SUBSPACE_PATH:-}" ]]; then
+    MISC_ARGS+=(
+        --exclude-subspace-path "${EXCLUDE_SUBSPACE_PATH}"
+        --exclude-subspace-k "${EXCLUDE_K:?set EXCLUDE_K with EXCLUDE_SUBSPACE_PATH}"
+        --exclude-subspace-side "${EXCLUDE_SIDE:-right}"
+        --exclude-subspace-mode "${EXCLUDE_MODE:-exclude}"
+    )
+fi
+
 if ! is_true "${SFT_GRADIENT_ACCUMULATION_FUSION:-0}"; then
     MISC_ARGS+=( --no-gradient-accumulation-fusion )
 fi
