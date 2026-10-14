@@ -27,6 +27,7 @@ layers per group) next to the activation top-k (the maximum), and next to every 
 from __future__ import annotations
 
 import argparse
+import re
 import statistics
 from collections import defaultdict
 from pathlib import Path
@@ -103,10 +104,18 @@ def main() -> None:
                              "orth(A^{alpha/2} Z) so the random basis captures the same activation energy as the "
                              "reference's top --match-k (mean over the group's tensors). Default: alpha = 1.")
     parser.add_argument("--match-k", type=int, default=64)
+    parser.add_argument("--side", default="right", choices=("right", "left", "both"),
+                        help="right: input-side V from A (--eig); left: output-side U from G (--geig), per tensor; "
+                             "both: both. The unused side gets a 1-column zero placeholder, as the trainer expects.")
+    parser.add_argument("--geig", type=Path, default=None,
+                        help="output-side second moments G = E[delta delta^T] per tensor, keys "
+                             "'layers.L.<self_attn.q_proj|...|mlp.down_proj>.{eigvals,eigvecs}' (needed for left/both)")
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     if args.output.exists():
         raise FileExistsError(f"{args.output} exists; remove it or pick another --output")
+    if args.side in ("left", "both") and args.geig is None:
+        parser.error("--side left/both needs --geig")
     report_k = [int(k) for k in args.report_k.split(",") if k.strip() and int(k) <= args.k_max]
 
     locations = tensor_locations(args.base)
@@ -126,10 +135,41 @@ def main() -> None:
     tensors: dict[str, torch.Tensor] = {}
     group_bases: dict[tuple[int, str], torch.Tensor] = {}
     energy = defaultdict(list)  # (group, basis, k) -> per layer
+    geig = safe_open(str(args.geig), framework="pt") if args.side in ("left", "both") else None
+    left_alphas = defaultdict(list)  # kind -> per layer
     with safe_open(str(args.eig), framework="pt") as eig:
         keys = set(eig.keys())
         for name in names:
             layer, group = int(CANONICAL_RE.match(name).group(1)), GROUP_OF_KIND[tensor_kind(name)]
+            with safe_open(str(locations[name]), framework="pt") as handle:
+                n_out, n_in_w = handle.get_slice(name).get_shape()
+            if geig is not None:
+                # output side: per tensor, U = orth(G^{alpha/2} Z), alpha matched to the reference's U energy
+                module = re.sub(r"^model\.layers\.\d+\.", "", name).removesuffix(".weight")
+                gv = geig.get_tensor(f"layers.{layer}.{module}.eigvecs").double()
+                gl = geig.get_tensor(f"layers.{layer}.{module}.eigvals").double()
+                if gv.shape[0] != n_out:
+                    raise ValueError(f"{name} has n_out={n_out}, G eigvecs of {module} have {gv.shape[0]}")
+                zu = torch.randn(n_out, args.k_max, generator=generator, dtype=torch.float64)
+                if match is not None:
+                    target = captured_energy(match.get_tensor(f"{name}.U").double()[:, :args.match_k], gv, gl)
+                    alpha, u = matched_alpha(zu, gv, gl, args.match_k, target)
+                    left_alphas[tensor_kind(name)].append(alpha)
+                else:
+                    u = orth(sqrt_a_times(zu, gv, gl))
+                tensors[f"{name}.U"] = u.float().contiguous()
+                for k in report_k:
+                    energy[(f"G {tensor_kind(name)} out", "grad-random", k)].append(captured_energy(u[:, :k], gv, gl))
+                    top = gl.clamp(min=0)
+                    energy[(f"G {tensor_kind(name)} out", "grad-top (max)", k)].append(float(top[:k].sum() / top.sum()))
+                    for cname, handle in compare.items():
+                        if f"{name}.U" in handle.keys():
+                            cu = handle.get_tensor(f"{name}.U").double()
+                            if k <= cu.shape[1]:
+                                energy[(f"G {tensor_kind(name)} out", cname, k)].append(captured_energy(cu[:, :k], gv, gl))
+            if args.side == "left":
+                tensors[f"{name}.V"] = torch.zeros(n_in_w, 1)
+                continue
             vecs = eig.get_tensor(f"layers.{layer}.{group}.eigvecs").double()
             vals = eig.get_tensor(f"layers.{layer}.{group}.eigvals").double()
             n_in = vecs.shape[0]
@@ -157,12 +197,11 @@ def main() -> None:
                     top = vals.clamp(min=0)
                     energy[(group, "act-top (max)", k)].append(float(top[:k].sum() / top.sum()))
             v = group_bases[(layer, group)]
-            with safe_open(str(locations[name]), framework="pt") as handle:
-                n_out, n_in_w = handle.get_slice(name).get_shape()
             if n_in_w != n_in:
                 raise ValueError(f"{name} has n_in={n_in_w}, eigvecs of {group} have {n_in}")
             tensors[f"{name}.V"] = v.float().contiguous()
-            tensors[f"{name}.U"] = torch.zeros(n_out, 1)
+            if args.side == "right":
+                tensors[f"{name}.U"] = torch.zeros(n_out, 1)
             for cname, handle in compare.items():
                 ckey = f"{name}.V"
                 if ckey in handle.keys():
@@ -174,15 +213,19 @@ def main() -> None:
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     save_file(tensors, str(args.output), metadata={
-        "k_max": str(args.k_max), "kind": "activation_energy_random", "side": "right", "seed": str(args.seed),
+        "k_max": str(args.k_max), "kind": "activation_energy_random", "side": args.side, "seed": str(args.seed),
         "center_out_mean": str(args.center_out_mean), "eig": str(args.eig),
         "match": str(args.match or ""), "match_k": str(args.match_k if args.match else "")})
     print(f"exported energy-matched random bases (k_max={args.k_max}) for {len(tensors) // 2} tensors -> {args.output}")
     if alphas:
         print(f"alpha matched to {args.match} at k={args.match_k}: " + "  ".join(
             f"{g}: median {statistics.median(a):.2f} [{min(a):.2f},{max(a):.2f}]" for g, a in sorted(alphas.items())))
+    if left_alphas:
+        print(f"left (G) alpha matched to {args.match} at k={args.match_k}: " + "  ".join(
+            f"{g}: median {statistics.median(a):.2f} [{min(a):.2f},{max(a):.2f}]" for g, a in sorted(left_alphas.items())))
 
-    print("\n##### captured activation energy tr(V^T A V)/tr(A): median over layers [min, max] #####")
+    print("\n##### captured energy tr(V^T A V)/tr(A) (right) and tr(U^T G U)/tr(G) (left, 'G ... out' rows): "
+          "median over layers [min, max] #####")
     fmt = lambda v: f"{statistics.median(v):.3f} [{min(v):.3f},{max(v):.3f}]"  # noqa: E731
     for row in sorted({(g, b) for g, b, _ in energy}):
         print(f"  {row[0]:<22} {row[1]:<16} " + "  ".join(
