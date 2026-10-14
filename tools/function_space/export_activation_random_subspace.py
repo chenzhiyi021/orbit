@@ -39,13 +39,42 @@ from subspace_overlap_profile import GROUP_OF_KIND, all_target_tensors, tensor_k
 from svd_rank_profile import CANONICAL_RE, tensor_locations
 
 
-def sqrt_a_times(z: torch.Tensor, vecs: torch.Tensor, vals: torch.Tensor) -> torch.Tensor:
-    """A^{1/2} z with A known through its top eigenpairs (vecs: n x m) and all eigenvalues (vals)."""
+def a_power_times(z: torch.Tensor, vecs: torch.Tensor, vals: torch.Tensor, power: float = 0.5) -> torch.Tensor:
+    """A^power z with A known through its top eigenpairs (vecs: n x m) and all eigenvalues (vals)."""
     m = vecs.shape[1]
-    top = vals[:m].clamp(min=0).sqrt()
-    tail = vals[m:].clamp(min=0).mean().sqrt() if vals.numel() > m else torch.zeros((), dtype=vals.dtype)
+    top = vals[:m].clamp(min=1e-30).pow(power)
+    tail = vals[m:].clamp(min=1e-30).mean().pow(power) if vals.numel() > m else torch.zeros((), dtype=vals.dtype)
     coef = vecs.T @ z
     return vecs @ (top[:, None] * coef) + tail * (z - vecs @ coef)
+
+
+def sqrt_a_times(z: torch.Tensor, vecs: torch.Tensor, vals: torch.Tensor) -> torch.Tensor:
+    """A^{1/2} z (alpha = 1 of orth(A^{alpha/2} Z))."""
+    return a_power_times(z, vecs, vals, 0.5)
+
+
+def orth(m: torch.Tensor) -> torch.Tensor:
+    q, r = torch.linalg.qr(m)
+    return q * torch.sign(torch.diagonal(r))
+
+
+def matched_alpha(z: torch.Tensor, vecs: torch.Tensor, vals: torch.Tensor, k: int, target: float,
+                  lo: float = 0.0, hi: float = 2.0, iters: int = 30) -> tuple[float, torch.Tensor]:
+    """Bisect alpha so that orth(A^{alpha/2} Z)[:, :k] captures `target` activation energy (monotone in alpha)."""
+    def basis(alpha: float) -> torch.Tensor:
+        return orth(a_power_times(z, vecs, vals, alpha / 2))
+    if captured_energy(basis(hi)[:, :k], vecs, vals) <= target:
+        return hi, basis(hi)
+    if captured_energy(basis(lo)[:, :k], vecs, vals) >= target:
+        return lo, basis(lo)
+    for _ in range(iters):
+        mid = (lo + hi) / 2
+        if captured_energy(basis(mid)[:, :k], vecs, vals) < target:
+            lo = mid
+        else:
+            hi = mid
+    alpha = (lo + hi) / 2
+    return alpha, basis(alpha)
 
 
 def captured_energy(v: torch.Tensor, vecs: torch.Tensor, vals: torch.Tensor) -> float:
@@ -69,6 +98,11 @@ def main() -> None:
     parser.add_argument("--report-k", default="16,64,256")
     parser.add_argument("--compare", action="append", default=[], metavar="NAME=PATH",
                         help="other '<name>.V' basis files whose captured activation energy is printed alongside")
+    parser.add_argument("--match", default=None, metavar="PATH",
+                        help="a '<name>.V' basis file (e.g. a ΔW reference); per layer/group, tune alpha in "
+                             "orth(A^{alpha/2} Z) so the random basis captures the same activation energy as the "
+                             "reference's top --match-k (mean over the group's tensors). Default: alpha = 1.")
+    parser.add_argument("--match-k", type=int, default=64)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     if args.output.exists():
@@ -83,6 +117,12 @@ def main() -> None:
         name, _, path = item.partition("=")
         compare[name] = safe_open(path, framework="pt")
 
+    match = safe_open(str(args.match), framework="pt") if args.match else None
+    group_names = defaultdict(list)  # (layer, group) -> tensor names reading that input
+    for name in names:
+        group_names[(int(CANONICAL_RE.match(name).group(1)), GROUP_OF_KIND[tensor_kind(name)])].append(name)
+    alphas = defaultdict(list)  # group -> per layer
+
     tensors: dict[str, torch.Tensor] = {}
     group_bases: dict[tuple[int, str], torch.Tensor] = {}
     energy = defaultdict(list)  # (group, basis, k) -> per layer
@@ -95,16 +135,22 @@ def main() -> None:
             n_in = vecs.shape[0]
             if (layer, group) not in group_bases:
                 z = torch.randn(n_in, args.k_max, generator=generator, dtype=torch.float64)
-                m = sqrt_a_times(z, vecs, vals)
                 if args.center_out_mean:
                     key = f"layers.{layer}.{group}.mean"
                     if key not in keys:
                         raise KeyError(f"--center-out-mean needs {key} in {args.eig}")
                     mu = eig.get_tensor(key).double()
                     mu = mu / mu.norm()
-                    m = m - mu[:, None] * (mu @ m)[None, :]
-                q, r = torch.linalg.qr(m)
-                v = q * torch.sign(torch.diagonal(r))
+                    # remove the mean direction from Z's span before shaping; A^{p} keeps mu ~ eigvec 1
+                    z = z - mu[:, None] * (mu @ z)[None, :]
+                if match is not None:
+                    target = statistics.mean(
+                        captured_energy(match.get_tensor(f"{n}.V").double()[:, :args.match_k], vecs, vals)
+                        for n in group_names[(layer, group)])
+                    alpha, v = matched_alpha(z, vecs, vals, args.match_k, target)
+                    alphas[group].append(alpha)
+                else:
+                    v = orth(sqrt_a_times(z, vecs, vals))
                 group_bases[(layer, group)] = v
                 for k in report_k:
                     energy[(group, "act-random", k)].append(captured_energy(v[:, :k], vecs, vals))
@@ -129,8 +175,12 @@ def main() -> None:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     save_file(tensors, str(args.output), metadata={
         "k_max": str(args.k_max), "kind": "activation_energy_random", "side": "right", "seed": str(args.seed),
-        "center_out_mean": str(args.center_out_mean), "eig": str(args.eig)})
+        "center_out_mean": str(args.center_out_mean), "eig": str(args.eig),
+        "match": str(args.match or ""), "match_k": str(args.match_k if args.match else "")})
     print(f"exported energy-matched random bases (k_max={args.k_max}) for {len(tensors) // 2} tensors -> {args.output}")
+    if alphas:
+        print(f"alpha matched to {args.match} at k={args.match_k}: " + "  ".join(
+            f"{g}: median {statistics.median(a):.2f} [{min(a):.2f},{max(a):.2f}]" for g, a in sorted(alphas.items())))
 
     print("\n##### captured activation energy tr(V^T A V)/tr(A): median over layers [min, max] #####")
     fmt = lambda v: f"{statistics.median(v):.3f} [{min(v):.3f},{max(v):.3f}]"  # noqa: E731
