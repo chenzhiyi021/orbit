@@ -83,6 +83,9 @@ def main() -> None:
     parser.add_argument("--dtype", default="bf16", help=f"comma-separated output dtypes from {tuple(DTYPES)}")
     parser.add_argument("--output-root", required=True, type=Path)
     parser.add_argument("--prefix", default=None, help="output dir prefix (default: the fine-tune's dir name)")
+    parser.add_argument("--kinds", default=None,
+                        help="comma-separated tensor kinds to project (e.g. q_proj,k_proj,v_proj,o_proj); the other "
+                             "q/k/v/o/gate/up/down weights are copied from the fine-tune unchanged. Default: all")
     parser.add_argument("--device", default="cpu")
     args = parser.parse_args()
 
@@ -92,9 +95,11 @@ def main() -> None:
     if unknown := set(dtypes) - set(DTYPES):
         raise ValueError(f"unknown --dtype {sorted(unknown)}; choose from {tuple(DTYPES)}")
     prefix = args.prefix or args.finetuned.name
+    kinds = {k.strip() for k in args.kinds.split(",") if k.strip()} if args.kinds else None
+    kinds_tag = "" if kinds is None else "_only-" + "-".join(sorted(k.removesuffix("_proj") for k in kinds))
     variants = [(k, d) for k in ks for d in dtypes]
     tag = "rm" if args.mode == "exclude" else "keep"
-    out_dirs = {v: args.output_root / f"{prefix}_{tag}{args.side}_k{v[0]}_{v[1]}" for v in variants}
+    out_dirs = {v: args.output_root / f"{prefix}_{tag}{args.side}_k{v[0]}{kinds_tag}_{v[1]}" for v in variants}
     for out_dir in out_dirs.values():
         if out_dir.exists() and any(out_dir.glob("*.safetensors")):
             raise FileExistsError(f"{out_dir} already has weights; remove it or pick another --output-root/--prefix")
@@ -103,7 +108,8 @@ def main() -> None:
     base_locations = tensor_locations(args.base)
     # per variant, per kind: ||D||^2, ||D - P(D)||^2, ||P(D)||^2, ||R||^2, ||R - P(R)||^2
     stats = {v: defaultdict(lambda: defaultdict(float)) for v in variants}
-    n_targets = sum(1 for name in tensor_locations(args.finetuned) if CANONICAL_RE.match(name))
+    n_targets = sum(1 for name in tensor_locations(args.finetuned)
+                    if CANONICAL_RE.match(name) and (kinds is None or kind_of(name) in kinds))
     done = 0
     started = time.perf_counter()
 
@@ -121,7 +127,7 @@ def main() -> None:
             with safe_open(shard, framework="pt") as handle:
                 for name in handle.keys():
                     tuned = handle.get_tensor(name)
-                    if not CANONICAL_RE.match(name):
+                    if not CANONICAL_RE.match(name) or (kinds is not None and kind_of(name) not in kinds):
                         for k, d in variants:
                             outputs[(k, d)][name] = tuned.to(DTYPES[d])
                         continue
@@ -168,6 +174,7 @@ def main() -> None:
         (out_dir / "projection_report.json").write_text(json.dumps(dict(
             base=str(args.base), finetuned=str(args.finetuned), subspace=str(args.subspace),
             subspace_kind=meta.get("kind"), k=k, side=args.side, mode=args.mode, dtype=d,
+            kinds=None if kinds is None else sorted(kinds),
             all=overall, per_kind=per_kind), indent=2))
         print(f"k={k:<4d} {d}  inside_before={overall['inside_before']:.3e}  kept={overall['kept']:.3f}  "
               f"inside_after={overall['inside_after']:.3e}  -> {out_dir}")
