@@ -9,6 +9,13 @@ output space) from the NLL of response tokens, in one of two modes:
   --teacher-forced   rows carry an assistant turn (SFT data); prompt + that response is fed as is and
                      the loss is the SFT loss on it (off-policy methods).
 
+--loss picks the per-token loss on response tokens (rollout mode for the OPD ones, which need --teacher):
+  nll           -log p(y_t)                                  (default; SFT loss / true-Fisher probe)
+  opd_sampled   -sg(A_t) log p(y_t), A_t = log p_T(y_t) - log p(y_t)
+                orbit's OPD (--advantage-estimator on_policy_distillation --teacher-score-mode sampled_token)
+  opd_fullkl    KL(p || p_T) over the full vocabulary at every response position (exact reverse KL)
+The teacher scores the same token ids (Qwen3 student and teacher share the tokenizer).
+
 Prompt positions get gradient through attention and are included in G (like activation_covariance_
 overlap.py's token_scope=all); the loss is on response tokens only. Saves, per tensor,
 'layers.L.<self_attn.q_proj|...|mlp.down_proj>.{eigvals (all), eigvecs (top --k-max), mean}' for
@@ -98,10 +105,14 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--gen-batch", type=int, default=16)
     parser.add_argument("--batch", type=int, default=2, help="sequences per backward")
+    parser.add_argument("--loss", default="nll", choices=("nll", "opd_sampled", "opd_fullkl"))
+    parser.add_argument("--teacher", type=Path, default=None, help="teacher HF checkpoint for --loss opd_*")
     parser.add_argument("--k-max", type=int, default=256)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--save", required=True, type=Path)
     args = parser.parse_args()
+    if args.loss != "nll" and args.teacher is None:
+        parser.error(f"--loss {args.loss} needs --teacher")
 
     started = time.perf_counter()
     torch.manual_seed(args.seed)
@@ -113,6 +124,11 @@ def main() -> None:
     for p in model.parameters():
         p.requires_grad_(False)
     seqs = teacher_forced_sequences(args, tok) if args.teacher_forced else rollout_sequences(args, tok, model)
+    teacher = None
+    if args.loss != "nll":
+        teacher = AutoModelForCausalLM.from_pretrained(args.teacher, dtype=torch.bfloat16).cuda().eval()
+        if teacher.config.vocab_size != model.config.vocab_size:
+            raise ValueError(f"teacher vocab {teacher.config.vocab_size} != student vocab {model.config.vocab_size}")
 
     sums, firsts, counts = {}, {}, defaultdict(int)
     state = {"mask": None}
@@ -145,9 +161,22 @@ def main() -> None:
         ids, att, tgt = ids.cuda(), att.cuda(), tgt.cuda()
         state["mask"] = att.bool()
         logits = model(input_ids=ids, attention_mask=att, use_cache=False).logits
-        lp = torch.log_softmax(logits[:, :-1].float(), -1).gather(-1, ids[:, 1:, None]).squeeze(-1)
-        (-(lp * tgt[:, 1:]).sum()).backward()
-        del logits, lp
+        logp = torch.log_softmax(logits[:, :-1].float(), -1)
+        lp = logp.gather(-1, ids[:, 1:, None]).squeeze(-1)
+        mask = tgt[:, 1:].float()
+        if args.loss == "nll":
+            loss = -(lp * mask).sum()
+        else:
+            with torch.no_grad():
+                tlogp = torch.log_softmax(teacher(input_ids=ids, attention_mask=att, use_cache=False).logits[:, :-1].float(), -1)
+            if args.loss == "opd_sampled":
+                adv = tlogp.gather(-1, ids[:, 1:, None]).squeeze(-1) - lp.detach()
+                loss = -(adv * lp * mask).sum()
+            else:
+                loss = ((logp.exp() * (logp - tlogp)).sum(-1) * mask).sum()
+            del tlogp
+        loss.backward()
+        del logits, logp, lp, loss
         if (s // args.batch) % 16 == 0:
             print(f"  backward {s + len(chunk)}/{len(seqs)}  {time.perf_counter() - started:.0f}s", flush=True)
     for h in hooks:
@@ -173,6 +202,7 @@ def main() -> None:
     args.save.parent.mkdir(parents=True, exist_ok=True)
     save_file(tensors, str(args.save), metadata={
         "model": str(args.model), "data": str(args.data), "teacher_forced": str(args.teacher_forced),
+        "loss": args.loss, "teacher": str(args.teacher or ""),
         "num_seqs": str(len(seqs)), "k_max": str(args.k_max)})
     print(f"\nsaved {args.save}  ({time.perf_counter() - started:.0f}s)")
     print("##### G spectrum: median over layers [min, max] #####")
