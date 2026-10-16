@@ -117,7 +117,8 @@ def get_responses(
         assert max_seq_lens is not None
         logits = logits.view(-1, logits.size(-1))
 
-    rollout_temperature = float(args.rollout_temperature)
+    research = getattr(args, "posttrain_protocol", None)
+    rollout_temperature = float(research["loss_temperature"] if research else args.rollout_temperature)
     # Skip the out-of-place div when temperature is 1.0: the result is identical
     # to the input but allocates a fresh full-vocab tensor (~6.5 GiB at
     # MAX_TOKENS_PER_GPU=16384 with fp32 logits) that immediately drives the
@@ -498,6 +499,10 @@ def compute_advantages_and_returns(args: Namespace, rollout_data: RolloutBatch) 
 
     rollout_data["advantages"] = advantages
     rollout_data["returns"] = returns
+    research = getattr(args, "posttrain_protocol", None)
+    if research and research["kind"] == "m6":
+        from orbit.research.posttrain.runtime import check_m6_advantages
+        check_m6_advantages(args, rollout_data)
 
 
 def vanilla_tis_function(
@@ -645,13 +650,19 @@ def policy_loss_function(
         log_probs = torch.cat(log_probs, dim=0)
         ppo_kl = old_log_probs - log_probs
 
-    pg_loss, pg_clipfrac = compute_policy_loss(
-        ppo_kl,
-        advantages,
-        args.eps_clip,
-        args.eps_clip_high,
-        args.eps_clip_c,
-    )
+    research = getattr(args, "posttrain_protocol", None)
+    if research:
+        from orbit.research.posttrain.objectives import policy_tokens
+        pg_loss, pg_clipfrac, _ = policy_tokens(
+            log_probs, old_log_probs, advantages,
+            force_one=research["kind"] == "m6", clip_low=args.eps_clip, clip_high=args.eps_clip_high,
+        )
+        if research["kind"] == "m6":
+            ppo_kl = log_probs.detach() - log_probs
+    else:
+        pg_loss, pg_clipfrac = compute_policy_loss(
+            ppo_kl, advantages, args.eps_clip, args.eps_clip_high, args.eps_clip_c,
+        )
 
     if args.use_opsm:
         pg_loss = pg_loss * opsm_mask

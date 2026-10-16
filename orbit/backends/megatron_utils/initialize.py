@@ -103,6 +103,10 @@ def init(args):
 
         _initialize_tp_communicators()
 
+    if getattr(args, "posttrain_protocol", None):
+        from orbit.research.posttrain.runtime import configure
+        configure(args)
+
     if getattr(args, "custom_megatron_init_path", None):
         from orbit.utils.misc import load_function
 

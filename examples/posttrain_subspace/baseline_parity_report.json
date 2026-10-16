@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "cpu": {
+    "status": "passed",
+    "tests": 28,
+    "failures": 0,
+    "errors": 0,
+    "python": "3.12.3",
+    "torch": "2.11.0+cpu",
+    "scope": [
+      "exact-action enumeration",
+      "legacy mathematical function parity",
+      "actual core response slicing/reducer",
+      "group normalization",
+      "CPU optimizer moments/resume/freeze",
+      "endpoint dense-delta reconstruction"
+    ],
+    "observations": {
+      "rkl_max_abs_gradient_error": 1.6691960436077125e-07
+    }
+  },
+  "gpu_migration": {
+    "m6_mixed_r2_reference": "not_run",
+    "rl_math_grpo_r4": "not_run",
+    "sft_omr_cot": "not_run",
+    "sft_teacher_matched": "not_run"
+  },
+  "formal_training": "not_run",
+  "formal_evaluation": "not_run",
+  "limitations": [
+    "CPU optimizer fixtures are not a Megatron distributed-optimizer or fused-kernel certification",
+    "M6 real-batch GPU migration and RL TP2/DP2 short runs remain mandatory",
+    "SFT/RL data identities must be resolved before running"
+  ],
+  "tested_source_hash": "4b6838338ff966e31fa3c4c1f30c999c801063fe6621ef5b77d6b2487bc6a2cd"
+}

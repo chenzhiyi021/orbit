@@ -1,0 +1,28 @@
+{
+  "base_branch": "main",
+  "base_commit": "3346b7f0609e170e5751a83f5906559bc017b965",
+  "delivery_history": "one direct child commit of base; no branch merge",
+  "sources": {
+    "m6": {
+      "run": "17694741.0",
+      "base_commit": "c5a58abae6f97937083d522bdf668dc74cc9d02e",
+      "sealed_files_verified": 544,
+      "historical_limit": "Full launch-time diff and unsealed core bytes are not recoverable from the audit"
+    },
+    "rl": {
+      "commit": "be4058abb805ee4abbc5cbf526c543a5352b414d",
+      "evidence": "code only",
+      "audited_default_lr": 5e-06,
+      "chosen_lr": 0.0002
+    },
+    "sft_legacy": {
+      "commit": "55e3cc18da0d65ae2a5a9a1e3d12197a5ea9d69b",
+      "path": "examples/sft/run-qwen3-1_7b-bf16-sft-openmathreasoning-100step.sh",
+      "evidence": "Static FullFT reference; successful data/run identity still requires the protocol manifest; its LR is not a LoRA result"
+    }
+  },
+  "input_documents": {
+    "protocol_decision_zh.md": "8db1c64fc6de88918295650942f638cfa4d9257e2efbf1ce8639ab4db432f503",
+    "AGENT_IMPLEMENTATION.md": "d5042c35bbf3fbd22234632ab624e5e7f749259f9c2b0d522449590f3e99fd29"
+  }
+}

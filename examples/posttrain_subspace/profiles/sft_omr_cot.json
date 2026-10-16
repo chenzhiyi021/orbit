@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "model": "Qwen/Qwen3-1.7B",
+  "async_rollout": false,
+  "tis": false,
+  "score_centering": false,
+  "delta_reward": false,
+  "normalize_advantages": false,
+  "updates_per_rollout": 1,
+  "loss_reduction": "global_token_with_zero_mask_floor",
+  "check_nonfinite": true,
+  "checkpoint": {
+    "optimizer": true,
+    "rng": true,
+    "interval": 20,
+    "complete_steps": [
+      0,
+      20,
+      40,
+      60,
+      80,
+      100
+    ],
+    "geometry_steps": [
+      0,
+      20,
+      40,
+      60,
+      80,
+      100
+    ]
+  },
+  "training_seed": 42,
+  "data_seed": 42,
+  "init_seed": null,
+  "loss_temperature": 1.0,
+  "reward_scale": 1.0,
+  "teacher_temperature": null,
+  "group_std": null,
+  "zero_variance_groups": "keep",
+  "formal_eval_step": 100,
+  "first_panel": true,
+  "source_definition": "implementation_audit_20261016",
+  "name": "sft_omr_cot",
+  "kind": "sft",
+  "steps": 100,
+  "batch": {
+    "prompts": 256,
+    "samples_per_prompt": 1,
+    "global_sequences": 256,
+    "micro_sequences": null,
+    "max_tokens_per_gpu": null
+  },
+  "parallel": {
+    "tp": null,
+    "dp": null,
+    "pp": 1,
+    "cp": 1
+  },
+  "optimizer": {
+    "name": "adam",
+    "lr": null,
+    "min_lr": "0.1 * selected_lr",
+    "schedule": "cosine",
+    "warmup_steps": 10,
+    "beta1": 0.9,
+    "beta2": 0.999,
+    "eps": 1e-08,
+    "weight_decay": 0.0,
+    "clip_norm": 1.0,
+    "distributed": null
+  },
+  "adapter": {
+    "method": "lora",
+    "rank": 2,
+    "alpha": 2,
+    "dropout": 0.0,
+    "initialization": null,
+    "layout": "fused_shared_a",
+    "expected_parameters": 1835008
+  },
+  "sampling": {
+    "temperature": 1.0,
+    "top_p": 1.0,
+    "top_k": -1,
+    "max_prompt_tokens": "from_data_manifest",
+    "max_response_tokens": "from_data_manifest",
+    "max_total_tokens": "from_data_manifest"
+  },
+  "shuffle": false,
+  "data_identity": "official_omr_cot",
+  "ratio": "none",
+  "basis_seed": "not_applicable"
+}

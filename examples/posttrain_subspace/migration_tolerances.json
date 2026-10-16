@@ -1,0 +1,30 @@
+{
+  "raw_advantage": {
+    "atol": 1e-07,
+    "rtol": 1e-05
+  },
+  "scaled_advantage": {
+    "atol": 1e-07,
+    "rtol": 1e-05
+  },
+  "scalar_loss": {
+    "atol": 1e-07,
+    "rtol": 1e-05
+  },
+  "gradients": {
+    "atol": 1e-07,
+    "rtol": 1e-05
+  },
+  "adam_m": {
+    "atol": 1e-07,
+    "rtol": 1e-05
+  },
+  "adam_v": {
+    "atol": 1e-07,
+    "rtol": 1e-05
+  },
+  "effective_delta": {
+    "atol": 1e-07,
+    "rtol": 1e-05
+  }
+}

@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "model": "Qwen/Qwen3-1.7B",
+  "async_rollout": false,
+  "tis": false,
+  "score_centering": false,
+  "delta_reward": false,
+  "normalize_advantages": false,
+  "updates_per_rollout": 1,
+  "loss_reduction": "global_token_with_zero_mask_floor",
+  "check_nonfinite": true,
+  "checkpoint": {
+    "optimizer": true,
+    "rng": true,
+    "interval": 20,
+    "complete_steps": [
+      0,
+      20,
+      50,
+      100,
+      150,
+      200,
+      250,
+      300
+    ],
+    "geometry_steps": [
+      0,
+      20,
+      50,
+      100,
+      150,
+      200,
+      250,
+      300
+    ]
+  },
+  "training_seed": 42,
+  "data_seed": 42,
+  "init_seed": 42,
+  "loss_temperature": 1.0,
+  "reward_scale": 1.0,
+  "teacher_temperature": null,
+  "group_std": "sample",
+  "zero_variance_groups": "keep",
+  "formal_eval_step": 300,
+  "first_panel": true,
+  "source_definition": "implementation_audit_20261016",
+  "name": "rl_math_grpo_r4",
+  "kind": "rl",
+  "steps": 300,
+  "group_epsilon": 1e-06,
+  "batch": {
+    "prompts": 64,
+    "samples_per_prompt": 4,
+    "global_sequences": 256,
+    "micro_sequences": null,
+    "max_tokens_per_gpu": 8192
+  },
+  "parallel": {
+    "tp": 2,
+    "dp": 2,
+    "pp": 1,
+    "cp": 1
+  },
+  "optimizer": {
+    "name": "adam",
+    "lr": 0.0002,
+    "min_lr": 0.0,
+    "schedule": "constant",
+    "warmup_steps": 0,
+    "beta1": 0.9,
+    "beta2": 0.999,
+    "eps": 1e-08,
+    "weight_decay": 0.0,
+    "clip_norm": 1.0,
+    "distributed": true
+  },
+  "adapter": {
+    "method": "lora",
+    "rank": 4,
+    "alpha": 4,
+    "dropout": 0.0,
+    "initialization": "xavier_normal",
+    "layout": "fused_shared_a",
+    "expected_parameters": 3670016
+  },
+  "sampling": {
+    "temperature": 1.0,
+    "top_p": 1.0,
+    "top_k": -1,
+    "max_prompt_tokens": "from_data_manifest",
+    "max_response_tokens": 8192,
+    "max_total_tokens": "from_data_manifest"
+  },
+  "shuffle": true,
+  "data_identity": "verified_math_labels",
+  "ratio": "learner_current_over_cached_old",
+  "audit_code_default_lr": 5e-06,
+  "basis_seed": "not_applicable"
+}

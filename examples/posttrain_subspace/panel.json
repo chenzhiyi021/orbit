@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "automatic_submission": false,
+  "stages": [
+    {"id": "A1", "profile": "m6_mixed_r2_reference", "condition": "free", "stop": 100, "requires": ["fixed_real_batch_gpu_parity", "short_gpu_resume"]},
+    {"id": "A2", "profile": "rl_math_grpo_r4", "condition": "free", "stop": 300, "requires": ["rl_data_manifest", "tp2_dp2_gpu_parity"]},
+    {"id": "A3", "profile": "sft_omr_cot", "condition": "free_r2_candidate", "stop": 100, "requires": ["sft_data_manifest", "limited_dev_lr_selection", "sft_gpu_parity"]},
+    {"id": "B1", "profile": "m6_mixed_r2_reference", "condition": "same_A0_freeze_A", "freeze_factor": "right", "stop": 100, "requires": ["A1_effective_baseline"]},
+    {"id": "B2", "profile": "m6_mixed_r2_reference", "condition": "free_resume", "source_step": 20, "freeze_factor": "none", "stop": 100, "requires": ["common_full_step20"]},
+    {"id": "B3", "profile": "m6_mixed_r2_reference", "condition": "freeze_A_resume", "source_step": 20, "freeze_factor": "right", "stop": 100, "requires": ["common_full_step20"]}
+  ],
+  "deferred": ["teacher_matched_SFT", "freeze_B_resume", "warmup_matched_constant_control", "Haar_and_energy_matched_sources", "higher_rank_source_bases"],
+  "interpretation_only": ["posthoc_reset_A", "posthoc_initial_rowspace_projection"],
+  "note": "Do not construct a Cartesian grid. Constant controls and additional seeds need their own protocol IDs; they are not silently accepted by the M6 reference."
+}

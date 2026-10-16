@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "state": "unresolved",
+  "identity": "verified_math_labels",
+  "data": {
+    "path": null,
+    "sha256": null
+  },
+  "row_count": null,
+  "source": {
+    "dataset": "nvidia/OpenMathReasoning",
+    "revision": null,
+    "split": null,
+    "provenance_sha256": null,
+    "trace_author": null,
+    "trace_field": null,
+    "think_tag_policy": null
+  },
+  "tokenizer": {
+    "path": null,
+    "files": [],
+    "chat_template_sha256": null
+  },
+  "processing": {
+    "prompt_format": null,
+    "assistant_format": null,
+    "eos_policy": null,
+    "truncation_policy": null,
+    "packing_policy": "isolated_sequences",
+    "max_prompt_tokens": null,
+    "max_response_tokens": 8192,
+    "max_total_tokens": null
+  },
+  "splits": {
+    "train_question_ids_sha256": null,
+    "dev_question_ids_sha256": null,
+    "eval_question_ids_sha256": null,
+    "question_disjoint_audit_sha256": null
+  },
+  "ground_truth": {
+    "path": null,
+    "sha256": null,
+    "source_revision": null
+  }
+}

@@ -2048,6 +2048,9 @@ def parse_args(add_custom_arguments=None):
             )
 
     sglang_validate_args(args)
+    if getattr(args, "posttrain_protocol", None):
+        # The actor's verified complete checkpoint determines the first rollout.
+        args.start_rollout_id = None
 
     return args
 

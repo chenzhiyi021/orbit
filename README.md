@@ -142,3 +142,7 @@ Orbit stands on the shoulders of these excellent projects:
 ## License
 
 Orbit is released under the [Apache License 2.0](LICENSE).
+
+## Post-training subspace research
+
+The [unified research profiles](examples/posttrain_subspace/README.md) define audited M6 OPD, Official-CoT SFT, and verifier GRPO on the M6 dependency anchor, with explicit data manifests, complete resume state, and separate CPU/GPU acceptance records.

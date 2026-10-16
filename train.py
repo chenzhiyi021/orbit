@@ -121,6 +121,9 @@ async def train(args):
             )
         if args.rollout_global_dataset:
             await rollout_manager.save.remote(rollout_id)
+        if getattr(args, "posttrain_protocol", None):
+            from orbit.research.posttrain.checkpoint import mark_complete
+            mark_complete(args, rollout_id)
 
     # train loop.
     # note that for async training, one can change the position of the sync operation(ray.get).
@@ -171,7 +174,11 @@ async def train(args):
             async with _timed_phase(prefix, "actor train", timing_raw=timing_raw):
                 await actor_model.train(rollout_id, rollout_data_ref)
 
-        if should_run_periodic_action(rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout):
+        save_now = should_run_periodic_action(rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout)
+        if getattr(args, "posttrain_protocol", None):
+            from orbit.research.posttrain.runtime import should_save
+            save_now = should_save(args, rollout_id)
+        if save_now:
             async with _timed_phase(prefix, "save", timing_raw=timing_raw):
                 await save(rollout_id)
 
@@ -199,6 +206,12 @@ async def train(args):
             refresh=False,
         )
         rollout_pbar.update(1)
+        qualification_updates = getattr(args, "posttrain_qualification_updates", None)
+        if qualification_updates and rollout_id + 1 >= args.start_rollout_id + qualification_updates:
+            # Keep the formal scheduler horizon; this is a separately labelled GPU check.
+            if not save_now:
+                await save(rollout_id)
+            break
         rollout_step = compute_rollout_step(args, rollout_id)
         progress_metrics = eta_report.to_metrics(step=rollout_step)
         for phase_name, elapsed in timing_raw.items():

@@ -215,6 +215,12 @@ def save_training_state(
         },
         state_path,
     )
+    if hasattr(optimizer, "_posttrain_context"):
+        from orbit.research.posttrain.checkpoint import save_state
+        args, model = optimizer._posttrain_context
+        save_state(adapter_dir, model, optimizer, opt_param_scheduler,
+                   completed_updates=args._posttrain_completed, protocol=args.posttrain_protocol,
+                   data_hash=args.posttrain_data_manifest["data"]["sha256"], rank=rank)
     logger.info(f"Saved optimizer/scheduler state to {state_path.parent}")
 
 
@@ -693,6 +699,9 @@ def save_peft_adapter_checkpoint(
             state_dict[hf_name] = weight
 
     if is_dp_rank_0 and tp_rank == 0:
+        if optimizer is not None and hasattr(optimizer, "_posttrain_context") and method == "lora":
+            from orbit.research.posttrain.factors import validate_shared_export
+            validate_shared_export(state_dict)
         _save_peft_hf_artifacts(
             save_path,
             state_dict,

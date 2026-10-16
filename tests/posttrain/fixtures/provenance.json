@@ -1,0 +1,54 @@
+{
+  "evidence": "Verbatim function bodies from implementation_audit_20261016; historical evidence level retained",
+  "sources": [
+    {
+      "name": "_safe_clamp_log_ratio",
+      "audit_path": "source/orbit-develop/orbit/utils/ppo_utils.py",
+      "start_line": 13,
+      "end_line": 20,
+      "source_sha256": "18d1985a513ed6c2648cfd409caa8726cfddd424bba3eb277369fad0d91d1593"
+    },
+    {
+      "name": "_safe_exp_neg_ppo_kl",
+      "audit_path": "source/orbit-develop/orbit/utils/ppo_utils.py",
+      "start_line": 23,
+      "end_line": 24,
+      "source_sha256": "18d1985a513ed6c2648cfd409caa8726cfddd424bba3eb277369fad0d91d1593"
+    },
+    {
+      "name": "compute_policy_loss",
+      "audit_path": "source/orbit-develop/orbit/utils/ppo_utils.py",
+      "start_line": 142,
+      "end_line": 166,
+      "source_sha256": "18d1985a513ed6c2648cfd409caa8726cfddd424bba3eb277369fad0d91d1593"
+    },
+    {
+      "name": "opd_mopd_advantages",
+      "audit_path": "source/orbit-develop/orbit/utils/ppo_utils.py",
+      "start_line": 334,
+      "end_line": 390,
+      "source_sha256": "18d1985a513ed6c2648cfd409caa8726cfddd424bba3eb277369fad0d91d1593"
+    },
+    {
+      "name": "initial_factors",
+      "audit_path": "campaign/rank_lora.py",
+      "start_line": 14,
+      "end_line": 21,
+      "source_sha256": "0fabf6ff07b597f6afb1a65ea1f3e543e45d4046174f7aeffc42e9234c20cc15"
+    },
+    {
+      "name": "seed",
+      "audit_path": "source/experiments/full_training_preparation_20260927/basis_math.py",
+      "start_line": 6,
+      "end_line": 7,
+      "source_sha256": "da0c62064d0c4945a59ce6daea797fd940115169ab3fb54d0cfba83c1b101f7e"
+    },
+    {
+      "name": "lr_at",
+      "audit_path": "campaign/schedule.py",
+      "start_line": 7,
+      "end_line": 11,
+      "source_sha256": "5df02116f2350b31928283b2a137a50629ae058d5ca0c693e7e9019cb2cb0c6e"
+    }
+  ]
+}

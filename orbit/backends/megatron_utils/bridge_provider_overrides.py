@@ -18,6 +18,10 @@ def apply_bridge_provider_overrides(
 ) -> None:
     """Apply orbit runtime overrides to a Megatron-Bridge provider."""
 
+    if getattr(args, "posttrain_protocol", None):
+        from megatron.core.transformer.enums import AttnBackend
+        requested = args.attention_backend
+        provider.attention_backend = AttnBackend[requested] if isinstance(requested, str) else requested
     provider.tensor_model_parallel_size = args.tensor_model_parallel_size
     provider.pipeline_model_parallel_size = args.pipeline_model_parallel_size
     provider.expert_model_parallel_size = args.expert_model_parallel_size

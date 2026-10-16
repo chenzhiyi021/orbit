@@ -78,6 +78,8 @@ class RolloutDataSource(DataSource):
                 apply_chat_template_kwargs=args.apply_chat_template_kwargs,
                 seed=args.rollout_seed,
             )
+            if getattr(args, "posttrain_protocol", None) and len(self.dataset) != args.posttrain_data_manifest["row_count"]:
+                raise ValueError("Research dataset construction filtered rows; resolve and record the length policy first")
             if self.args.rollout_shuffle:
                 self.dataset.shuffle(self.epoch_id)
         else:
@@ -127,6 +129,8 @@ class RolloutDataSource(DataSource):
             "sample_index": self.sample_index,
             "metadata": self.metadata,
         }
+        if getattr(self.args, "posttrain_protocol", None):
+            state_dict["posttrain_data_sha256"] = self.args.posttrain_data_manifest["data"]["sha256"]
         path = os.path.join(self.args.save, f"rollout/global_dataset_state_dict_{rollout_id}.pt")
         os.makedirs(os.path.dirname(path), exist_ok=True)
         torch.save(state_dict, path)
@@ -138,14 +142,26 @@ class RolloutDataSource(DataSource):
         if self.args.load is None:
             return
 
-        path = os.path.join(self.args.load, f"rollout/global_dataset_state_dict_{rollout_id}.pt")
+        resume = getattr(self.args, "posttrain_resume", None)
+        if resume:
+            path = self.args.posttrain_data_cursor
+            if not os.path.isfile(path):
+                raise RuntimeError(f"Complete research resume requires data cursor: {path}")
+        else:
+            path = os.path.join(self.args.load, f"rollout/global_dataset_state_dict_{rollout_id}.pt")
         if not os.path.exists(path):
             logger.info(f"Checkpoint {path} does not exist.")
             return
 
         logger.info(f"load metadata from {path}")
         logger.info(f"load metadata: {self.metadata}")
-        state_dict = torch.load(path)
+        state_dict = torch.load(path, weights_only=False)
+        if getattr(self.args, "posttrain_protocol", None):
+            expected_groups = (rollout_id + 1) * self.args.rollout_batch_size
+            if (state_dict.get("posttrain_data_sha256") != self.args.posttrain_data_manifest["data"]["sha256"]
+                or state_dict.get("sample_group_index") != expected_groups
+                or state_dict.get("sample_index") != expected_groups * self.args.n_samples_per_prompt):
+                raise ValueError("Research data cursor/hash does not match the complete optimizer checkpoint")
         self.sample_offset = state_dict.get("sample_offset", 0)
         self.epoch_id = state_dict.get("epoch_id", 0)
         self.sample_group_index = state_dict.get("sample_group_index", 0)

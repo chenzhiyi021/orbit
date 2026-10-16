@@ -1,0 +1,18 @@
+{
+  "optimizer": {
+    "lr": null,
+    "distributed": null
+  },
+  "adapter": {
+    "initialization": null
+  },
+  "parallel": {
+    "tp": null,
+    "dp": null
+  },
+  "batch": {
+    "micro_sequences": null,
+    "max_tokens_per_gpu": null
+  },
+  "init_seed": null
+}

@@ -1,0 +1,26 @@
+{
+  "manifest_version": 1,
+  "seed": null,
+  "samples_per_prompt": null,
+  "temperature": null,
+  "top_p": null,
+  "top_k": null,
+  "max_response_tokens": null,
+  "template_sha256": null,
+  "checkpoint_format": "HF LoRA adapter exported from full native checkpoint",
+  "merge_policy": "must be explicitly verified by the chosen evaluator",
+  "datasets": [],
+  "evaluator": {
+    "path": null,
+    "sha256": null,
+    "argv": []
+  },
+  "output_schema": [
+    "prompt_id",
+    "generation",
+    "judge_output",
+    "score",
+    "response_tokens",
+    "truncated"
+  ]
+}

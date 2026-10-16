@@ -628,6 +628,9 @@ class MegatronTrainRayActor(TrainRayActor):
         if self.args.debug_train_only or self.args.debug_rollout_only:
             return
 
+        if getattr(self.args, "posttrain_protocol", None) and not getattr(self, "_posttrain_sync_initialized", False):
+            self.weight_updater.weight_version = self.args._posttrain_completed
+            self._posttrain_sync_initialized = True
         if self.args.use_fault_tolerance:
             if dist.get_rank() == 0:
                 ray.get(self.rollout_manager.recover_updatable_engines.remote())

@@ -375,6 +375,9 @@ def train_one_step(
         Reduced loss dictionary (last stage only) and gradient norm for logging.
     """
     args = get_args()
+    if getattr(args, "posttrain_protocol", None):
+        from orbit.research.posttrain.runtime import before_step
+        before_step(args, optimizer, opt_param_scheduler, rollout_id, step_id, num_microbatches)
     dumper_phase_util = DumperMegatronUtil(args, model, DumperPhase.FWD_BWD)
 
     # Set grad to zero.
@@ -507,6 +510,9 @@ def train_one_step(
         # Update learning rate.
         assert update_successful
         opt_param_scheduler.step(increment=args.global_batch_size)
+        if getattr(args, "posttrain_protocol", None):
+            from orbit.research.posttrain.runtime import after_step
+            after_step(args, optimizer, grad_norm)
 
     # release grad
     for model_chunk in model:
@@ -885,6 +891,10 @@ def initialize_model_and_optimizer(
 
         check_model_hashes(args, model, iteration)
 
-    opt_param_scheduler.step(increment=iteration * args.global_batch_size)
+    if getattr(args, "posttrain_protocol", None):
+        from orbit.research.posttrain.runtime import initialized
+        iteration = initialized(args, model, optimizer, opt_param_scheduler, iteration)
+    else:
+        opt_param_scheduler.step(increment=iteration * args.global_batch_size)
 
     return model, optimizer, opt_param_scheduler, iteration
