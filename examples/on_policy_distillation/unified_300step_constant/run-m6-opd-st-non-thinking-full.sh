@@ -200,7 +200,7 @@ WANDB_ARGS=(
 )
 
 PERF_ARGS=(
-    --tensor-model-parallel-size 2
+    --tensor-model-parallel-size "${TENSOR_MODEL_PARALLEL_SIZE:-2}"
     --pipeline-model-parallel-size 1
     --context-parallel-size 1
     --expert-model-parallel-size 1
