@@ -160,9 +160,22 @@ fi
 
 DEBUG_ARGS=()
 
-# Full fine-tuning (source yaml has no PEFT/LoRA config).
-PEFT_ARGS=(
-    --peft-method none
-)
+# Full fine-tuning (source yaml has no PEFT/LoRA config) unless LORA_RANK is set:
+# then LoRA on all linears, scale alpha/rank (LORA_ALPHA default 32, as in "LoRA Without
+# Regret"; pair with a ~10x LR, e.g. LR=5e-5). Not combinable with EXCLUDE_SUBSPACE_PATH.
+if [[ -n "${LORA_RANK:-}" ]]; then
+    PEFT_ARGS=(
+        --peft-method lora
+        --peft-variant standard
+        --lora-rank "${LORA_RANK}"
+        --lora-alpha "${LORA_ALPHA:-32}"
+        --lora-dropout 0.0
+        --target-modules all-linear
+    )
+else
+    PEFT_ARGS=(
+        --peft-method none
+    )
+fi
 
 source "${ORBIT_ROOT}/scripts/lib/launcher.sh"
