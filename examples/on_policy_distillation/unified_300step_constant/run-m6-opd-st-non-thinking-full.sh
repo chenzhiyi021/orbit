@@ -54,7 +54,11 @@ source "${ORBIT_ROOT}/scripts/lib/tool_env.sh"
 source "${ORBIT_ROOT}/scripts/lib/common.sh"
 
 # === Recipe identity ===
-LAUNCHER_NAME=unified_300step_constant_m6_opd_st_full_non_thinking
+if [[ -n "${LORA_RANK:-}" ]]; then
+    LAUNCHER_NAME="${LAUNCHER_NAME:-m6_opd_st_non_thinking_lora_r${LORA_RANK}}"
+else
+    LAUNCHER_NAME="${LAUNCHER_NAME:-unified_300step_constant_m6_opd_st_full_non_thinking}"
+fi
 WANDB_PROJECT=${WANDB_PROJECT:-orbit-adapt}
 WANDB_GROUP=${WANDB_GROUP:-${LAUNCHER_NAME}}
 PRECISION_PROFILE=bf16
@@ -243,8 +247,22 @@ MISC_ARGS=(
 
 DEBUG_ARGS=( --log-passrate )
 
-PEFT_ARGS=(
-    --peft-method none
-)
+# Full fine-tuning unless LORA_RANK is set: then LoRA on all linears (base weights,
+# embedding and norms frozen), scale alpha/rank with LORA_ALPHA default 32 as in
+# "LoRA Without Regret"; pair with a ~10x LR, e.g. LR=5e-5.
+if [[ -n "${LORA_RANK:-}" ]]; then
+    PEFT_ARGS=(
+        --peft-method lora
+        --peft-variant standard
+        --lora-rank "${LORA_RANK}"
+        --lora-alpha "${LORA_ALPHA:-32}"
+        --lora-dropout 0.0
+        --target-modules all-linear
+    )
+else
+    PEFT_ARGS=(
+        --peft-method none
+    )
+fi
 
 source "${ORBIT_ROOT}/scripts/lib/launcher.sh"
