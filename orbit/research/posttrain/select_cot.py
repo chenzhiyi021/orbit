@@ -66,7 +66,17 @@ def scan(paths, columns, keep):
             cols = [table.column(c).to_pylist() for c in key_cols]
             hit = [r for r, values in enumerate(zip(*cols)) if keep(*values)]
             if hit:
-                traces = pf.read_row_group(g, columns=[trace_col]).column(trace_col).take(hit).to_pylist()
+                # Pick rows chunk by chunk: ``take`` concatenates chunks and overflows the 2 GB
+                # offsets of a plain ``string`` column on OpenScienceReasoning-2's big row groups.
+                chunks = pf.read_row_group(g, columns=[trace_col]).column(trace_col).chunks
+                starts = [0]
+                for chunk in chunks:
+                    starts.append(starts[-1] + len(chunk))
+                traces, c = [], 0
+                for r in hit:
+                    while r >= starts[c + 1]:
+                        c += 1
+                    traces.append(chunks[c][r - starts[c]].as_py())
                 for r, trace in zip(hit, traces):
                     yield shard, offset + r, [c[r] for c in cols] + [trace]
             offset += table.num_rows
