@@ -42,6 +42,8 @@ def main():
     p.add_argument("--tokenizer", required=True)
     p.add_argument("--rows", type=int, default=25600, help="100 steps x 256")
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--fill-shortfall", action="store_true",
+                   help="if a domain has too few unused rows, take its deficit evenly from the other domains")
     p.add_argument("--output-dir", required=True, type=Path)
     a = p.parse_args()
     if a.output_dir.exists():
@@ -68,11 +70,20 @@ def main():
         if qid(text) not in banned:
             pool.setdefault(domain, []).append(i)
     rng = random.Random(a.seed)
+    counts = dict(target)
+    short = {d: counts[d] - len(pool.get(d, [])) for d in counts if counts[d] > len(pool.get(d, []))}
+    if short and not a.fill_shortfall:
+        raise ValueError(f"not enough unused rows: {short}; pass --fill-shortfall to move the deficit to other domains")
+    for d, deficit in short.items():
+        counts[d] -= deficit
+        donors = sorted(x for x in counts if x not in short)
+        for j, x in enumerate(donors):  # split the deficit evenly; the audit records the final mix
+            counts[x] += deficit // len(donors) + (j < deficit % len(donors))
     picked = []
-    for domain in sorted(target):
-        if len(pool.get(domain, [])) < target[domain]:
-            raise ValueError(f"{domain}: need {target[domain]} rows, only {len(pool.get(domain, []))} unused")
-        picked += rng.sample(pool[domain], target[domain])
+    for domain in sorted(counts):
+        if len(pool.get(domain, [])) < counts[domain]:
+            raise ValueError(f"{domain}: need {counts[domain]} rows, only {len(pool.get(domain, []))} unused")
+        picked += rng.sample(pool[domain], counts[domain])
     rng.shuffle(picked)
 
     def row(i, text):
@@ -94,6 +105,7 @@ def main():
     audit = {"purpose": "LR calibration bank; questions disjoint from the formal B_target Train, Dev and Eval",
              "seed": a.seed, "rows": len(picked), "unique_questions": len(calib_ids),
              "domain_rows": dict(Counter(domains[i] for i in picked)), "matched_to": f"B_target first {a.rows} rows",
+             "target_domain_rows": dict(target), "shortfall_moved_to_other_domains": short,
              "overlap": {"b_target": len(calib_ids & b_ids), "dev": len(calib_ids & dev_ids), "eval": len(calib_ids & eval_ids)},
              "calib_btarget_sha256": digest(a.output_dir / "calib_btarget.jsonl"),
              "dev_btarget_sha256": digest(a.output_dir / "dev_btarget.jsonl"),
