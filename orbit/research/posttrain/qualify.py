@@ -27,7 +27,7 @@ def cpu_report(output):
             "torch": torch.__version__,
             "scope": ["exact-action enumeration", "legacy mathematical function parity", "actual core response slicing/reducer", "group normalization", "CPU optimizer moments/resume/freeze", "endpoint dense-delta reconstruction"],
         },
-        "gpu_migration": {name: "not_run" for name in ["m6_mixed_r2_reference", "rl_math_grpo_r4", "sft_omr_cot", "sft_teacher_matched"]},
+        "gpu_migration": {name: "not_run" for name in ["m6_mixed_r2_reference", "rl_math_grpo_r4", "sft_omr_cot", "sft_teacher_matched", "sft_btarget_official_cot"]},
         "formal_training": "not_run",
         "formal_evaluation": "not_run",
         "limitations": ["CPU optimizer fixtures are not a Megatron distributed-optimizer or fused-kernel certification", "M6 real-batch GPU migration and RL TP2/DP2 short runs remain mandatory", "SFT/RL data identities must be resolved before running"],

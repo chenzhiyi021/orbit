@@ -18,7 +18,7 @@ M6_DATA_SHA256 = "bfebe57eb0b3bccafcfa7efed981ed946f6af6192db363c661f19c46f78a1e
 
 
 def load_profile(name: str) -> dict:
-    if name not in {"m6_mixed_r2_reference", "rl_math_grpo_r4", "sft_omr_cot", "sft_teacher_matched"}:
+    if name not in {"m6_mixed_r2_reference", "rl_math_grpo_r4", "sft_omr_cot", "sft_teacher_matched", "sft_btarget_official_cot"}:
         raise ValueError(f"Unknown profile: {name}")
     return json.loads((PROFILES / f"{name}.json").read_text())
 
