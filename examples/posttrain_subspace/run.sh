@@ -30,7 +30,10 @@ PRECISION_PROFILE=bf16
 RUN_LOG="$RUN_DIR/train.log"
 DISABLE_EVAL=1
 RAY_NUM_CPUS=$((4 * GPUS_PER_NODE))
-export RAY_TEMP_DIR="$RUN_DIR/ray"
+# Ray's AF_UNIX socket paths must stay under 107 bytes, so the session lives under a short
+# per-run /tmp directory; $RUN_DIR/ray links to it for the record.
+export RAY_TEMP_DIR="${POSTTRAIN_RAY_TMP:-/tmp/ptray_$(printf '%s' "$RUN_DIR" | sha1sum | cut -c1-8)}"
+mkdir -p "$RAY_TEMP_DIR" && ln -sfn "$RAY_TEMP_DIR" "$RUN_DIR/ray"
 source "$ROOT/orbit_plugins/model_args/qwen3-1.7B.sh"
 COLOCATE_ARGS=(); CKPT_ARGS=(--hf-checkpoint "$HF_CKPT" --load "$MEGATRON_LOAD")
 ROLLOUT_ARGS=(); OPTIMIZER_ARGS=(); RL_ARGS=(); LOSS_ARGS=(); WANDB_ARGS=()
