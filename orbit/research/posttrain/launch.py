@@ -190,6 +190,8 @@ def main():
     ap.add_argument("--execute", action="store_true")
     ap.add_argument("--qualification-updates", type=int, choices=[1, 2, 3])
     ap.add_argument("--gpu-acceptance", type=Path)
+    ap.add_argument("--allow-environment-mismatch", action="store_true",
+                    help="debug: run a --qualification-updates check on a non-anchor stack (recorded, never formal)")
     args = ap.parse_args()
     decision = json.loads(args.sft_decision.read_text()) if args.sft_decision else None
     p = resolve_sft(args.profile, decision)
@@ -223,7 +225,12 @@ def main():
             raise ValueError("--environment-roots is required to verify the shared M6 source stack")
         from .environment import inspect_environment
 
-        environment = inspect_environment(json.loads(args.environment_roots.read_text()))
+        if args.allow_environment_mismatch and not args.qualification_updates:
+            raise ValueError("--allow-environment-mismatch is only for --qualification-updates debug runs")
+        # Debug-only escape hatch: the mismatch is still recorded (environment.lock, verified=false).
+        environment = inspect_environment(json.loads(args.environment_roots.read_text()), check=not args.allow_environment_mismatch)
+        if not environment["verified"]:
+            print("WARNING: environment differs from the M6 anchor; qualification debug run only:\n  " + "\n  ".join(environment["errors"]), file=sys.stderr)
         if not args.qualification_updates:
             if not args.gpu_acceptance:
                 raise ValueError("Formal execution requires --gpu-acceptance; use --qualification-updates 3 for short GPU checks")
