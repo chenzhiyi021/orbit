@@ -13,8 +13,13 @@ def tokenize_row(row, tokenizer, policy, think_tag_policy):
     response = row["response"]
     if not isinstance(response, str) or not response:
         raise ValueError("SFT source needs a nonempty complete assistant response")
-    if think_tag_policy == "strip_literal_tags_keep_content":
+    if think_tag_policy in ("strip_literal_tags_keep_content", "strip_literal_tags_keep_content_trim_outer_whitespace"):
         response = response.replace("<think>", "").replace("</think>", "")
+        if think_tag_policy.endswith("_trim_outer_whitespace"):
+            # "<think>\n..." leaves a leading newline that BPE-merges with the prompt's
+            # trailing "\n\n" (the empty think block); trimming only outer whitespace keeps
+            # every content character and the prompt tokens intact.
+            response = response.strip()
     elif think_tag_policy != "preserve":
         raise ValueError("Explicit think-tag policy required")
     prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)
@@ -26,7 +31,8 @@ def tokenize_row(row, tokenizer, policy, think_tag_policy):
     ending = "" if truncated or response.endswith(tokenizer.eos_token) else tokenizer.eos_token
     full = tokenizer.encode(prompt + response + ending, add_special_tokens=False)
     if full[: len(prompt_ids)] != prompt_ids:
-        raise ValueError("Template/BPE boundary changed prompt tokens; inspect the approved formatting")
+        raise ValueError(f"Template/BPE boundary changed prompt tokens (source_id {row.get('source_id')}); "
+                         f"response starts with {response[:20]!r}; inspect the approved formatting")
     target = full[len(prompt_ids) :]
     cap = min(policy["max_response_tokens"], policy["max_total_tokens"] - len(prompt_ids))
     if len(target) > cap:
