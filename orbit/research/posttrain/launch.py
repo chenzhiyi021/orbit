@@ -125,10 +125,10 @@ def compile_arguments(profile, manifest, model, output, *, teacher=None, teacher
         recompute_method="uniform",
         recompute_num_layers=1,
         # Untruncated long-CoT SFT puts ~45k tokens x 152k vocab logits on one GPU: compute the
-        # response log-probs in sequence chunks and recompute them in backward instead of
+        # response log-probs in sequence chunks, each recomputed in backward (ppo_utils), instead of
         # keeping full-size fp32 intermediates (same math, memory only).
         log_probs_chunk_size=4096 if p["kind"] == "sft" else -1,
-        recompute_loss_function=p["kind"] == "sft",
+        recompute_loss_function=False,
         offload_train=False,
         offload_train_async=False,
         offload_rollout=p["kind"] != "sft",

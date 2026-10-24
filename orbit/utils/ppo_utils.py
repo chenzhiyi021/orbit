@@ -5,6 +5,7 @@ import contextlib
 from argparse import Namespace
 
 import torch
+import torch.utils.checkpoint
 import torch.distributed as dist
 import torch.nn.functional as F
 
@@ -681,9 +682,17 @@ def calculate_log_probs_and_entropy(
             num_chunks = (logits.size(0) - 1) // chunk_size + 1
             tokens_chunks = tokens.chunk(num_chunks, dim=0)
             logits_chunks = logits.chunk(num_chunks, dim=0)
+            # Checkpoint each chunk: otherwise every chunk keeps its fp32 softmax for backward
+            # and the chunks together hold a full [R, V] fp32 tensor, which defeats chunking.
+            recompute = torch.is_grad_enabled() and logits.requires_grad
             log_probs = []
             for tokens_chunk, logits_chunk in zip(tokens_chunks, logits_chunks, strict=True):
-                log_prob = compute_log_probs(logits_chunk, tokens_chunk, tp_group)
+                if recompute:
+                    log_prob = torch.utils.checkpoint.checkpoint(
+                        compute_log_probs, logits_chunk, tokens_chunk, tp_group, use_reentrant=False
+                    )
+                else:
+                    log_prob = compute_log_probs(logits_chunk, tokens_chunk, tp_group)
                 log_probs.append(log_prob)
             log_prob = torch.cat(log_probs, dim=0)
             if with_entropy:
