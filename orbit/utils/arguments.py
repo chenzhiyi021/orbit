@@ -2162,7 +2162,9 @@ def _apply_custom_config_args(args) -> None:
         return
 
     with open(args.custom_config_path) as f:
-        data = yaml.safe_load(f)
+        # JSON configs go through json: PyYAML (YAML 1.1) reads exponent floats without a dot,
+        # e.g. json.dumps(4e-05) == "4e-05", as strings.
+        data = json.load(f) if str(args.custom_config_path).endswith(".json") else yaml.safe_load(f)
     if data is None:
         data = {}
     elif not isinstance(data, dict):
