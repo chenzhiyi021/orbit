@@ -463,6 +463,9 @@ def train_one_step(
             if batch["multimodal_train_inputs"] is not None:
                 forward_kwargs.update(batch["multimodal_train_inputs"])
 
+            if getattr(args, "keep_bf16_logits", False):
+                forward_kwargs["fp32_output"] = False
+
             output_tensor = model(**forward_kwargs)
 
         for m, old_stage in zip(all_replay_managers, old_stages, strict=True):

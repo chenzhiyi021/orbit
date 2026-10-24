@@ -129,6 +129,7 @@ def compile_arguments(profile, manifest, model, output, *, teacher=None, teacher
         # keeping full-size fp32 intermediates (same math, memory only).
         log_probs_chunk_size=4096 if p["kind"] == "sft" else -1,
         recompute_loss_function=False,
+        keep_bf16_logits=p["kind"] == "sft",
         offload_train=False,
         offload_train_async=False,
         offload_rollout=p["kind"] != "sft",

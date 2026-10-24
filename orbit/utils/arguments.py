@@ -404,6 +404,15 @@ def get_orbit_extra_args_provider(add_custom_arguments=None):
                 "--log-probs-chunk-size", type=int, default=-1, help="Chunk size to compute log probs to save memory"
             )
             parser.add_argument(
+                "--keep-bf16-logits",
+                action="store_true",
+                help=(
+                    "Training forward keeps the output layer's bf16 logits instead of Megatron's full-size "
+                    "fp32 copy (Float16Module fp32_output=False); log-probs still upcast per chunk, so the "
+                    "values are identical. Halves logits memory for very long sequences."
+                ),
+            )
+            parser.add_argument(
                 "--allgather-cp",
                 action="store_true",
                 default=False,

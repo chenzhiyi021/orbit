@@ -107,7 +107,8 @@ def get_responses(
     parallel_state = get_parallel_state()
     qkv_format = args.qkv_format
 
-    assert logits.dtype == torch.float32, f"{logits.dtype}"
+    bf16_ok = getattr(args, "keep_bf16_logits", False) and logits.dtype == torch.bfloat16
+    assert logits.dtype == torch.float32 or bf16_ok, f"{logits.dtype}"
     assert len(logits.shape) == 3, f"{logits.shape}"
 
     if qkv_format == "thd":
