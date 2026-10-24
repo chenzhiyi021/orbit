@@ -98,7 +98,7 @@ python -m orbit.research.posttrain.qualify compare \
   --tolerances examples/posttrain_subspace/migration_tolerances.json --output fixed_batch_comparison.json
 ```
 
-正式`--execute`还需 `--gpu-acceptance acceptance.json`。它必须绑定当前profile hash与源码hash，逐项标明 `fixed_real_batch,optimizer_step,full_resume,parameter_registry,runtime_layout`通过；验收依据保存在run目录，不修改repo里的CPU报告来伪装GPU完成。
+**当前已停用两道启动门槛**：`--gpu-acceptance` 验收文件和 M6 依赖锚点（Bridge/MCore/SGLang commit、torch、Python）检查。锚点里的 Bridge `9d4c97c6`、SGLang `da862537` 在上游和实验室远程仓库都取不到，GPU 验收工具也尚未实现。`--environment-roots` 仍可传入，环境会写进 run 目录的 `environment.lock`（`verified` 标明是否与锚点一致），但不阻止启动。因此现在的 run 不具备原协议的 GPU 迁移认证；恢复这两道门槛前，结果须注明此点。
 
 ## 保存、恢复与第一轮干预
 
