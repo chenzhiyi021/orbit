@@ -6,6 +6,8 @@ export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONNOUSERSITE=1 PYTHONUNBUFFERED=1 SGLANG_RETURN_ORIGINAL_LOGPROB=0
 export NVTE_FLASH_ATTN=1 NVTE_FUSED_ATTN=0 NVTE_UNFUSED_ATTN=0
 export ORBIT_RAY_LIFECYCLE=private ORBIT_LOG_FILTER=0
+# Variable-length long sequences fragment the caching allocator (GBs reserved but unusable).
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 mapfile -t FIELDS < <(python3 - "$CONFIG" <<'PY'
 import json,sys
 c=json.load(open(sys.argv[1]))
