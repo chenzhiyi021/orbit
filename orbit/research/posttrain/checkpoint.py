@@ -37,7 +37,16 @@ def restore_rng(state):
         torch.cuda.set_rng_state_all(state["cuda"])
         from megatron.core import tensor_parallel
 
-        tensor_parallel.get_cuda_rng_tracker().set_states(state["tracker"])
+        # capture_rng flattens Generators to byte tensors; the TE tracker needs its Generators back.
+        tracker = tensor_parallel.get_cuda_rng_tracker()
+        current = tracker.get_states()
+        restored = {}
+        for key, value in state["tracker"].items():
+            restored[key] = value
+            if isinstance(current.get(key), torch.Generator):
+                current[key].set_state(value)
+                restored[key] = current[key]
+        tracker.set_states(restored)
 
 
 def _master_pairs(model, optimizer):

@@ -4,9 +4,12 @@ import copy
 import json
 import math
 from pathlib import Path
+import random
+import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 import torch
 
@@ -456,6 +459,20 @@ class AdditionalContractTests(unittest.TestCase):
             update(initial, other, other_scheduler, x)
             for m, expected in zip(other.fp32_from_float16_groups[0], optimizer.fp32_from_float16_groups[0], strict=True):
                 self.assertTrue(torch.equal(m, expected))
+
+    def test_restore_rng_keeps_te_tracker_generators(self):
+        generator = torch.Generator().manual_seed(1)
+        saved = generator.get_state().clone()
+        expected = torch.rand(1, generator=generator)
+        tracker = SimpleNamespace(states={"model-parallel-rng": generator})
+        tracker.get_states = lambda: tracker.states
+        tracker.set_states = lambda states: setattr(tracker, "states", states)
+        fake = SimpleNamespace(get_cuda_rng_tracker=lambda: tracker)
+        state = {"python": random.getstate(), "torch": torch.get_rng_state(), "cuda": [], "tracker": {"model-parallel-rng": saved}}
+        with mock.patch.dict(sys.modules, {"megatron.core": SimpleNamespace(tensor_parallel=fake)}), mock.patch.object(torch.cuda, "set_rng_state_all"):
+            restore_rng(state)
+        self.assertIs(tracker.states["model-parallel-rng"], generator)
+        self.assertTrue(torch.equal(torch.rand(1, generator=generator), expected))
 
     def test_effective_motion_matches_dense_delta(self):
         from orbit.research.posttrain.factors import effective_motion_squared, endpoint_basis
